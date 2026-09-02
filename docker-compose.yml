@@ -1,0 +1,423 @@
+name: betting-features-oss
+
+# Open-source Flink + Fluss betting feature store demo.
+# Replaces the VVP-based create_vvp_drafts.sh with flink run / SQL Client.
+#
+# Prerequisites:
+#   1. Run ./download-jars.sh once to populate ./lib/ with connector JARs.
+#   2. docker compose up -d
+#   3. Follow start.sh or README for SQL setup and job submission.
+#
+# Fluss is the feature store here and the only store — there is no Iceberg/MinIO lakehouse
+# tier. Fluss keeps its own cold log segments and KV snapshots on a local bind mount
+# (remote.data.dir in conf/fluss-server.yaml), so nothing needs an object store.
+#
+# Ports exposed to the host:
+#   8081  — Flink Web UI
+#   9123  — Fluss coordinator (bootstrap for flink / pyfluss clients)
+#   9092  — Redpanda Kafka (internal Docker), 19092 from the host
+#   5432  — PostgreSQL
+#   9051  — Inference service REST API
+#   3000  — Grafana
+#   8082  — Redpanda Console
+
+services:
+
+  # ── Fluss coordination (ZooKeeper) ──────────────────────────────────────────
+
+  zookeeper:
+    image: zookeeper:3.9.1
+    hostname: zookeeper
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_SERVERS: "server.1=zookeeper:2888:3888;2181"
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD", "zkServer.sh", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Fluss coordinator server ─────────────────────────────────────────────────
+
+  coordinator-server:
+    image: apache/fluss:0.9.1-incubating
+    hostname: coordinator-server
+    command: coordinatorServer
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    volumes:
+      - ./conf/fluss-server.yaml:/opt/fluss/conf/server.yaml
+      - ./fluss-remote-data:/tmp/fluss/remote-data
+    ports:
+      - "9123:9123"
+    networks:
+      - flink-net
+    healthcheck:
+      # Real TCP check. The previous version ended in `|| true; exit 0`, so it always
+      # reported healthy and depends_on: service_healthy gave no ordering guarantee.
+      # Note: the server binds its advertised hostname, not localhost.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/coordinator-server/9123"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+
+  # ── Fluss tablet server ──────────────────────────────────────────────────────
+
+  tablet-server:
+    image: apache/fluss:0.9.1-incubating
+    hostname: tablet-server
+    command: tabletServer
+    depends_on:
+      coordinator-server:
+        condition: service_started
+    volumes:
+      - ./conf/fluss-server.yaml:/opt/fluss/conf/server.yaml
+      - ./fluss-remote-data:/tmp/fluss/remote-data
+    networks:
+      - flink-net
+
+  # ── Flink session cluster ────────────────────────────────────────────────────
+  # lib/ is mounted from the host — run ./download-jars.sh first.
+
+  jobmanager:
+    image: apache/flink:1.20
+    hostname: jobmanager
+    entrypoint: /bin/sh
+    command:
+      - -c
+      # This shell runs as root; docker-entrypoint.sh then drops the JVM to the `flink`
+      # user. Docker creates the flink-checkpoints volume mountpoint as root:root 0755, so
+      # without the chown the JobManager cannot create per-job checkpoint directories and
+      # every submission dies with:
+      #   IOException: Failed to create directory for shared state: file:/tmp/flink-checkpoints/<jobid>/shared
+      # It worked before the volume existed only because plain /tmp is mode 1777.
+      - "chown flink:flink /tmp/flink-checkpoints 2>/dev/null || true; cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh jobmanager"
+    environment:
+      TZ: UTC
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: ${TASK_SLOTS:-16}
+        parallelism.default: 1
+        # 8 jobs (7 feature + 1 risk scoring) each hold a slot for their lifetime. The old
+        # 8-slot cluster had none left for the batch SELECTs in 06_analytics_and_monitoring.sql,
+        # which then queued forever instead of returning.
+        jobmanager.memory.process.size: ${JM_PROCESS_SIZE:-4g}
+        # Pin the planner's zone. event_ts is a naive TIMESTAMP(3) parsed from the
+        # generator's UTC string, but CURRENT_TIMESTAMP/PROCTIME() are TIMESTAMP_LTZ.
+        # 05_risk_scoring_inference.sql mixes the two (enrichment_lag_ms, and the
+        # loss-streak staleness guard), so a non-UTC zone here skews both.
+        table.local-time-zone: UTC
+        rest.port: 8081
+        rest.address: 0.0.0.0
+        state.backend: filesystem
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        execution.checkpointing.interval: 60s
+        # Without an explicit strategy Flink uses NoRestartBackoffTimeStrategy, so a single
+        # TaskManager blip fails every job permanently ("Recovery is suppressed by
+        # NoRestartBackoffTimeStrategy") and they must be re-submitted by hand. With this,
+        # jobs restore from the last checkpoint once a TM is back.
+        restart-strategy.type: exponential-delay
+        restart-strategy.exponential-delay.initial-backoff: 10s
+        restart-strategy.exponential-delay.max-backoff: 2min
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - ./flink_sql:/opt/flink_sql:ro
+      - ./fluss-remote-data:/tmp/fluss/remote-data
+      # Shared with the taskmanager on purpose. state.checkpoints.dir is a file:// path, so
+      # the JM writes _metadata while the TM writes the state files it references. Left as
+      # each container's own /tmp, those two halves live on different filesystems and a
+      # recovering TaskManager cannot read the state the previous one wrote.
+      - flink-checkpoints:/tmp/flink-checkpoints
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://jobmanager:8081/overview"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    restart: unless-stopped
+
+  taskmanager:
+    image: apache/flink:1.20
+    hostname: taskmanager
+    entrypoint: /bin/sh
+    command:
+      - -c
+      # chown for the same reason as the jobmanager — see the comment there.
+      - "chown flink:flink /tmp/flink-checkpoints 2>/dev/null || true; cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh taskmanager"
+    environment:
+      TZ: UTC
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: ${TASK_SLOTS:-16}
+        parallelism.default: 1
+        table.local-time-zone: UTC
+        # Defaults are sized for a 64 GB host. This leaves ~35 GB for everything else, which is far more
+        # than the ~10 GB the rest of the stack needs.
+        #
+        # Why this is not just "4g was too small on a big box": `state.backend: filesystem`
+        # means HashMapStateBackend, so ALL operator state lives on the task heap, and only
+        # a fraction of process memory ends up there. At 4g Flink resolved it to:
+        #   taskmanager.memory.task.heap.size = 1127428886b   (1.05 GB)
+        #   taskmanager.memory.managed.size   = 1438814063b   (1.34 GB, never used)
+        # 1 GB of heap for seven windowed/join/MATCH_RECOGNIZE jobs exhausts in about half
+        # an hour. The TM then GC-thrashes rather than throwing OutOfMemoryError, stops
+        # answering RPC, and the JobManager reports a checkpoint-trigger AskTimeout followed
+        # by "Heartbeat of TaskManager ... timed out" — which reads like a dead container
+        # but is really heap starvation. Verify the real split after any change with:
+        #   docker compose logs taskmanager | grep -i "task.heap.size"
+        # Override for a smaller machine (a laptop's Docker VM is often 8-12 GB):
+        #   TM_PROCESS_SIZE=5g JM_PROCESS_SIZE=2g TASK_SLOTS=8 ./start.sh
+        # Keep managed.fraction at 0.1 when you scale down — that ratio is what makes the
+        # heap usable, independent of total size.
+        taskmanager.memory.process.size: ${TM_PROCESS_SIZE:-24g}
+        # Default is 0.4, which would park ~9 GB in managed memory that HashMapStateBackend
+        # cannot use. Dropping it to 0.1 redirects that to the task heap where state lives.
+        # Raise this again if you switch to RocksDB, which does use managed memory.
+        taskmanager.memory.managed.fraction: 0.1
+        # Batch-mode SELECTs against Fluss (06_analytics_and_monitoring.sql) use the
+        # batch shuffle read buffer pool. The 128m default is too small once the streaming
+        # jobs are also running, and queries fail with:
+        #   OutOfMemoryError: Can't allocate enough direct buffer for batch shuffle read buffer pool
+        taskmanager.memory.framework.off-heap.size: ${TM_FRAMEWORK_OFFHEAP:-1g}
+        state.backend: filesystem
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - ./fluss-remote-data:/tmp/fluss/remote-data
+      - flink-checkpoints:/tmp/flink-checkpoints
+    networks:
+      - flink-net
+    deploy:
+      replicas: 1
+    # Without this, a TM that dies for any reason stays dead: the cluster sits at
+    # "Registered TMs: 0" and every job loops on NoResourceAvailableException until
+    # someone notices. See GUIDE.md "Surviving a TaskManager loss".
+    restart: unless-stopped
+
+  # NOTE: this container never runs /docker-entrypoint.sh (it just idles so we can
+  # `docker compose exec` into it), so FLINK_PROPERTIES would be ignored. The cluster
+  # address is appended to config.yaml directly instead — without it the SQL Client
+  # falls back to the image default rest.address 0.0.0.0 and job submission fails with
+  # "Connection refused: /0.0.0.0:8081".
+  #
+  # The checkpointing/restart keys in that block are NOT redundant with the jobmanager's
+  # FLINK_PROPERTIES. Checkpointing is baked into the JobGraph by whoever submits it, so
+  # setting it only on the JM left every SQL-submitted job with checkpointing disabled —
+  # and Flink's default restart strategy with checkpointing off is *no restart*. That is
+  # why one TaskManager loss permanently failed all 7 jobs while the tiering job (which
+  # start.sh submits from the jobmanager container, so it did inherit checkpointing)
+  # merely went to RESTARTING. Symptom to watch for: the JM log shows "Completed
+  # checkpoint N" only for the tiering job and never for jobA/B*/C*/D.
+  sql-client:
+    image: apache/flink:1.20
+    hostname: sql-client
+    environment:
+      # No FLINK_PROPERTIES here on purpose — this container never runs
+      # /docker-entrypoint.sh, so it would be ignored. table.local-time-zone is
+      # appended to config.yaml by the command below instead.
+      TZ: UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true
+        grep -q '^execution.checkpointing.interval' /opt/flink/conf/config.yaml || \
+          printf '\njobmanager.rpc.address: jobmanager\nrest.address: jobmanager\nrest.port: 8081\ntable.local-time-zone: UTC\ntable.exec.source.idle-timeout: 5 s\nexecution.checkpointing.interval: 60s\nstate.backend: filesystem\nstate.checkpoints.dir: file:///tmp/flink-checkpoints\nrestart-strategy.type: exponential-delay\nrestart-strategy.exponential-delay.initial-backoff: 10s\nrestart-strategy.exponential-delay.max-backoff: 2min\n' \
+            >> /opt/flink/conf/config.yaml
+        sleep infinity
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - ./flink_sql:/opt/flink_sql:ro
+      - ./fluss-remote-data:/tmp/fluss/remote-data
+    networks:
+      - flink-net
+
+  # ── Redpanda (Kafka-compatible broker) ───────────────────────────────────────
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.7
+    hostname: redpanda
+    command:
+      - redpanda
+      - start
+      - --node-id=0
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --smp=1
+      - --memory=1G
+      - --mode=dev-container
+      - --default-log-level=warn
+    ports:
+      - "19092:19092"
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  redpanda-init:
+    image: redpandadata/redpanda:v24.3.7
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c", "rpk topic create bets bet_settlements login_events deposits risk_scores --brokers redpanda:9092 --partitions 4 && echo 'Kafka topics created.'"]
+    networks:
+      - flink-net
+
+  redpanda-console:
+    image: redpandadata/console:v2.7.2
+    hostname: redpanda-console
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8082:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - flink-net
+
+  # ── PostgreSQL (CDC source for player dimensions) ────────────────────────────
+
+  postgres:
+    image: postgres:15
+    hostname: postgres
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: admin1
+      POSTGRES_DB: betting
+      TZ: UTC
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=5
+      - -c
+      - max_wal_senders=5
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./pg_betting_ddl.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./pg_betting_sink_ddl.sql:/docker-entrypoint-initdb.d/02_sink.sql:ro
+      - ./pg_cdc_setup.sql:/docker-entrypoint-initdb.d/03_cdc.sql:ro
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d betting"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Data generators (baseline traffic + outliner UI) ─────────────────────────
+
+  baseline-gen:
+    image: python:3.11-slim
+    environment:
+      # Pin UTC: event_time is a naive string from datetime.now(), so the
+      # container's zone silently defines what it means. See GUIDE.md.
+      TZ: UTC
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./datagen:/app:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q && python3 baseline_generator.py"
+    networks:
+      - flink-net
+    restart: on-failure
+
+  outliner-gen:
+    image: python:3.11-slim
+    environment:
+      # Pin UTC: event_time is a naive string from datetime.now(), so the
+      # container's zone silently defines what it means. See GUIDE.md.
+      TZ: UTC
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./datagen:/app:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q && python3 outliner_generator.py"
+    ports:
+      - "9050:9050"
+    networks:
+      - flink-net
+    restart: on-failure
+
+  # ── Python inference service ─────────────────────────────────────────────────
+
+  inference:
+    build:
+      context: inference_service
+    hostname: inference
+    environment:
+      FLUSS_BOOTSTRAP: "coordinator-server:9123"
+      KAFKA_BOOTSTRAP: "redpanda:9092"
+    ports:
+      - "9051:9051"
+    depends_on:
+      # Must be service_healthy, not service_started: the inference service opens its
+      # Fluss connection once at startup with no retry, so if the coordinator is not
+      # accepting connections yet it comes up permanently with fluss_ready=false and
+      # /score silently returns an empty feature dict.
+      coordinator-server:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    networks:
+      - flink-net
+    restart: on-failure
+
+  # ── Grafana (monitoring) ──────────────────────────────────────────────────────
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    hostname: grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ../betting_features/grafana:/var/lib/grafana/dashboards
+    networks:
+      - flink-net
+
+networks:
+  flink-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  flink-checkpoints:

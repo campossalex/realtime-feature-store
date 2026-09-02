@@ -1,0 +1,7 @@
+flask
+kafka-python
+pyfluss
+onnxruntime
+scikit-learn
+skl2onnx
+numpy

@@ -1,0 +1,40 @@
+# Fluss server configuration for the Docker Compose OSS demo.
+# Mounted at /opt/fluss/conf/server.yaml inside coordinator-server and tablet-server.
+# Fluss is the only store in this scenario — there is no Iceberg lakehouse tier.
+
+zookeeper.address: zookeeper:2181
+
+# Advertised address for client connections (Flink connector, pyfluss)
+coordinator.host: coordinator-server
+
+# Required by TabletServer
+tablet-server.id: 1
+tablet-server.host: tablet-server
+
+# Remote data directory — Fluss writes cold log segments and KV snapshots here.
+#
+# Deliberately a shared local path, NOT s3://. When remote.data.dir is on S3, Fluss
+# hands clients short-lived STS credentials (S3DelegationTokenProvider → GetSessionToken),
+# and MinIO does not implement GetSessionToken — it answers "An unsupported API call".
+# The token is never issued, so every Flink read that touches remote data dies with:
+#   NoAwsCredentialsException: Dynamic session credentials for Fluss: No AWS Credentials
+#
+# The same host directory is bind-mounted into coordinator-server, tablet-server,
+# jobmanager, taskmanager and sql-client, so readers and writers see one filesystem.
+remote.data.dir: /tmp/fluss/remote-data
+
+# ── No datalake tiering ───────────────────────────────────────────────────────
+#
+# `datalake.format` is deliberately unset, and the Iceberg tier it would need (MinIO,
+# the REST catalog, the tiering job) has been removed from this scenario. Fluss is both
+# the hot and the only store.
+#
+# Setting datalake.format is also not a one-line change: it rewrites the primary-key
+# encoding of every table created afterwards to match the lake format's bucketing, and
+# Fluss 0.9.1's Python client has no Iceberg key encoder. Every pyfluss point lookup —
+# the whole reason the online feature store exists — then fails with:
+#   FlussError: unsupported operation error
+#   KeyEncoder for Iceberg format is not yet implemented.
+# The Flink temporal join keeps working, so this surfaces only as /score silently
+# returning an empty feature dict. Re-adding tiering means restoring the removed
+# services and JARs and accepting that, not just setting this key.

@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: betting_db
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: betting
+    user: root
+    secureJsonData:
+      password: admin1
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1500
+      timescaledb: false
+    isDefault: false
