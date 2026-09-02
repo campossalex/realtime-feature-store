@@ -1,13 +1,11 @@
 # Realtime Feature Store
 
-Real-time feature engineering for a sports betting platform using **Apache Flink + Apache Fluss**, fully self-contained with Docker Compose. No Ververica Platform required.
-
-This is the open-source variant of `scenarios/betting_features/`. The SQL logic is identical; only the infrastructure and job submission differ.
+Real-time feature engineering for a sports betting platform using **Apache Flink + Apache Fluss**, fully self-contained with Docker Compose.
 
 The data generators and PostgreSQL schema live in this directory (`datagen/`, `pg_betting_ddl.sql`,
 `pg_betting_sink_ddl.sql`) rather than being shared with the VVP scenario, so they can be changed here
 without affecting it. Two things are still shared: the inference service build context and the Grafana
-dashboards, both under `../betting_features/`.
+dashboards.
 
 ---
 
@@ -192,7 +190,9 @@ Count it against the number of running jobs — one per job per minute. A count 
 ## Quick Start
 
 ```bash
-cd scenarios/betting_features_oss
+git clone https://github.com/campossalex/realtime-feature-store
+
+cd realtime-feature-store
 
 # 1. Download connector JARs (one-time, ~92 MB)
 ./download-jars.sh
@@ -418,22 +418,6 @@ Open http://localhost:3000 → **Betting Features** dashboard. The `FRAUD_HIGH` 
 | `04_feature_calculations.sql` | 6 streaming INSERT jobs (B1, B2, B3, C1, C2, D) — windowed features | Once — runs until stopped |
 | `05_risk_scoring_inference.sql` | Risk scoring → Kafka + PostgreSQL audit log | Once — runs until stopped |
 | `06_analytics_and_monitoring.sql` | Ad-hoc SELECT queries for verification | On-demand |
-
----
-
-## What Changed vs. the VVP Version
-
-| Aspect | VVP version (`betting_features/`) | OSS version (`betting_features_oss/`) |
-|--------|-----------------------------------|---------------------------------------|
-| Job submission | VVP REST API (`create_vvp_drafts.sh`) | `flink sql-client` + `flink run` |
-| Infrastructure | Kubernetes (minikube) | Docker Compose |
-| Kafka | `host.minikube.internal:9092` | Redpanda `redpanda:9092` |
-| Fluss bootstrap | K8s DNS `:9124` | `coordinator-server:9123` |
-| PostgreSQL | `host.minikube.internal:5432` | `postgres:5432` |
-| Lakehouse | Iceberg + Lakekeeper + MinIO | None — removed; Fluss is the only store |
-| Grafana | Manual datasource + dashboard import | Auto-provisioned via `provisioning/` |
-| Inference service | `kubectl apply` → minikube pod | `docker compose` service |
-| SQL logic | Same | Same — zero changes to business logic |
 
 ---
 
