@@ -1,4 +1,4 @@
-# Betting Feature Store — Open-Source Edition
+# Realtime Feature Store
 
 Real-time feature engineering for a sports betting platform using **Apache Flink + Apache Fluss**, fully self-contained with Docker Compose. No Ververica Platform required.
 
