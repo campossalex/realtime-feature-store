@@ -410,7 +410,7 @@ services:
       - "3000:3000"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning
-      - ../betting_features/grafana:/var/lib/grafana/dashboards
+      - ./grafana/provisioning/dashboards:/var/lib/grafana/dashboards
     networks:
       - flink-net
 
