@@ -1,0 +1,1576 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Builder</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/runmode/runmode.min.js"></script>
+<script>
+  // Before the stylesheet, so a saved theme applies on first paint (same key as the editor).
+  try {
+    const t = localStorage.getItem("sqlEditor.theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch {}
+</script>
+<link rel="stylesheet" href="/static/common.css">
+<link rel="stylesheet" href="/static/catalog.css">
+<script src="/static/common.js"></script>
+<script src="/static/catalog.js"></script>
+<style>
+  /* Page-only tokens: amber for "starting", the tint of a live box. */
+  :root { --warn: #9a6700; --live-bg: color-mix(in srgb, var(--ok) 14%, var(--panel));
+          /* Region washes, one light colour per column of the diagram. */
+          /* (light shades dark enough for the labels: 4.5:1 or more against their wash) */
+          --sources: #a64f00; --flink: #7d5f00; --model: #b3264a;
+          --warehouse: #7a45c9; --consumers: #22703d; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --warn: #e3b341;
+    --sources: #f5a25a; --flink: #e8c547; --model: #ff8fa8; --warehouse: #c4a2ff; --consumers: #71d394; } }
+  :root[data-theme="dark"] { --warn: #e3b341;
+    --sources: #f5a25a; --flink: #e8c547; --model: #ff8fa8; --warehouse: #c4a2ff; --consumers: #71d394; }
+
+  * { box-sizing: border-box; }
+  /* The page is the diagram: header on top, the stage fills the rest of the window and
+     never scrolls — moving around is pan and zoom. */
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); display: flex; flex-direction: column;
+         overflow: hidden; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; flex-wrap: wrap;
+           border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; }
+  header .spacer { flex: 1; }
+  #status { color: var(--muted); font-size: 13px; flex: 1 1 140px; min-width: 0; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; }
+  #status.bad { color: var(--err); }
+  header a { color: var(--accent); font-size: 13px; text-decoration: none; }
+  /* The "Components" menu */
+  .wmenu { position: relative; }
+  #wmenuBtn { display: inline-flex; align-items: center; gap: 6px; }
+  #wmenuBtn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+  .wicon { width: 16px; height: 16px; flex: none; }
+  .wlist { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20; width: min(380px, calc(100vw - 24px));
+           padding: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+           box-shadow: 0 12px 36px rgba(0,0,0,.28); }
+  .wlist[hidden] { display: none; }
+  .wlist a { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 6px;
+             color: var(--fg); text-decoration: none; font-size: 13px; outline: none; }
+  .wlist a:hover, .wlist a:focus-visible { background: var(--stmt-bg); text-decoration: none; }
+  .wlist a:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+  .wlist .wicon { width: 20px; height: 20px; color: var(--muted); }
+  .wlist .wicon.mark { fill: var(--fg); opacity: .85; }
+  .wlist b { display: block; font-weight: 600; }
+  .wlist small { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; }
+  .wlist .port { margin-left: auto; font: 11px var(--mono); color: var(--muted); }
+  header a:hover { text-decoration: underline; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+           background: var(--panel); color: var(--fg); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  button.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+  #theme { width: 32px; height: 32px; padding: 0; font-size: 16px; line-height: 1; }
+  /* ── The diagram: the whole stage, panned and zoomed through its viewBox ── */
+  #layout { flex: 1; min-height: 0; display: flex; position: relative; }   /* catalog panel | stage */
+  #stage { flex: 1; min-width: 0; min-height: 0; position: relative; overflow: hidden; outline: none;
+           background: radial-gradient(circle, color-mix(in srgb, var(--border) 70%, transparent) 1px, transparent 1.2px) 0 0 / 22px 22px, var(--bg); }
+  #stage:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+  .arch svg { display: block; width: 100%; height: 100%; color: var(--muted); cursor: grab; touch-action: none;
+              user-select: none; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .arch svg.panning { cursor: grabbing; }
+  .arch svg.panning .pill { cursor: grabbing; }
+  /* Boxes are solid white (the panel colour on the dark theme), whatever region they sit in. */
+  .arch .box { fill: var(--panel); stroke: var(--border); stroke-width: 1.5; transition: fill .3s, stroke .3s; }
+  .arch .region { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  /* Each technology's area: a dashed border in its colour over a light wash of it. */
+  .arch .region.sources { stroke: color-mix(in srgb, var(--sources) 55%, transparent); fill: color-mix(in srgb, var(--sources) 10%, transparent); }
+  .arch .region.flink { stroke: color-mix(in srgb, var(--flink) 55%, transparent); fill: color-mix(in srgb, var(--flink) 10%, transparent); }
+  .arch .region.model { stroke: color-mix(in srgb, var(--model) 55%, transparent); fill: color-mix(in srgb, var(--model) 10%, transparent); }
+  .arch .region.warehouse { stroke: color-mix(in srgb, var(--warehouse) 55%, transparent); fill: color-mix(in srgb, var(--warehouse) 10%, transparent); }
+  .arch .region.consumers { stroke: color-mix(in srgb, var(--consumers) 55%, transparent); fill: color-mix(in srgb, var(--consumers) 10%, transparent); }
+  .arch .title { fill: var(--fg); font-size: 13px; font-weight: 600; }
+  .arch .icon { fill: var(--fg); color: var(--fg); opacity: .85; }
+  .node[data-state="inactive"] .icon { opacity: .4; }
+  .arch .sub { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .arch .region-label { fill: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; }
+  .arch .region-label.sources { fill: var(--sources); } .arch .region-label.flink { fill: var(--flink); } .arch .region-label.model { fill: var(--model); }
+  .arch .region-label.warehouse { fill: var(--warehouse); } .arch .region-label.consumers { fill: var(--consumers); }
+  .arch .edge { fill: none; stroke: var(--muted); stroke-width: 1.5; transition: stroke .3s; }
+  /* A halo in the background colour, so a region border passing behind a label is masked. */
+  .arch .edge-label { fill: var(--muted); font-size: 11px; font-family: var(--mono);
+                      paint-order: stroke fill; stroke: var(--bg); stroke-width: 4px; stroke-linejoin: round; }
+  .arch .head { fill: var(--muted); } .arch .head-ok { fill: var(--ok); } .arch .head-err { fill: var(--err); }
+
+  /* Box states */
+  .node[data-state="inactive"] .box { stroke-dasharray: 5 4; }
+  .node[data-state="inactive"] .title, .node[data-state="inactive"] .sub { opacity: .55; }
+  .node[data-state="starting"] .box { stroke: var(--warn); stroke-width: 2; animation: pulse 1.6s ease-in-out infinite; }
+  .node[data-state="live"] .box { stroke: var(--ok); stroke-width: 2; fill: var(--live-bg); }
+  @keyframes pulse { 50% { stroke-opacity: .35; } }
+  /* Job arrows */
+  .job[data-state="running"] .edge { stroke: var(--ok); stroke-width: 2; stroke-dasharray: 7 5;
+                                     animation: flow .9s linear infinite; }
+  .job[data-state="running"] .edge-label { fill: var(--ok); }
+  .job[data-state="starting"] .edge { stroke: var(--warn); stroke-width: 2; }
+  .job[data-state="failing"] .edge { stroke: var(--err); stroke-width: 2; }
+  .job[data-state="failing"] .edge-label { fill: var(--err); }
+  @keyframes flow { to { stroke-dashoffset: -12; } }
+  .job[data-state="running"] .box { stroke: var(--ok); stroke-width: 2; fill: var(--live-bg); }
+  .job[data-state="starting"] .box { stroke: var(--warn); stroke-width: 2; animation: pulse 1.6s ease-in-out infinite; }
+  .job[data-state="failing"] .box { stroke: var(--err); stroke-width: 2; }
+  .job[data-ready="false"] .box { stroke-dasharray: 5 4; }
+  .job[data-ready="false"] .title, .job[data-ready="false"] .sub { opacity: .55; }
+  .job[data-ready="false"] .icon { opacity: .4; }
+  @media (prefers-reduced-motion: reduce) {
+    .job[data-state="running"] .edge, .node[data-state="starting"] .box, .job[data-state="starting"] .box { animation: none; }
+  }
+
+  /* Buttons drawn inside the SVG */
+  .pill { cursor: pointer; outline: none; }
+  /* Only the hover border animates: a fill transition can be caught mid-way on a theme change. */
+  .pill rect { fill: var(--panel); stroke: var(--border); stroke-width: 1.2; transition: stroke .15s; }
+  .pill text { fill: var(--fg); font-size: 11px; font-weight: 600; pointer-events: none; }
+  .pill:hover rect, .pill:focus-visible rect { stroke: var(--accent); }
+  .pill:focus-visible rect { stroke-width: 2; }
+  .pill.primary rect { fill: var(--accent); stroke: var(--accent); }
+  .pill.primary text { fill: var(--accent-fg); }
+  .pill.running rect { fill: color-mix(in srgb, var(--ok) 16%, var(--panel)); stroke: var(--ok); }
+  .pill.running text { fill: var(--ok); }
+  .pill.failing rect { stroke: var(--err); } .pill.failing text { fill: var(--err); }
+  .pill.off { cursor: default; } .pill.off rect { stroke-dasharray: 3 3; } .pill.off text { fill: var(--muted); font-weight: 500; }
+  .pill.off:hover rect { stroke: var(--border); }
+  .pill[hidden] { display: none; }
+  .pill.src .glyph { fill: none; stroke: var(--fg); stroke-width: 1.7; stroke-linecap: round; pointer-events: none; }
+  .pill.src:hover .glyph, .pill.src:focus-visible .glyph { stroke: var(--accent); }
+
+  /* ── Floating panels over the stage ── */
+  .float { position: absolute; z-index: 2; background: color-mix(in srgb, var(--panel) 94%, transparent);
+           border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px rgba(0,0,0,.18);
+           backdrop-filter: blur(6px); }
+  #steps { left: 16px; bottom: 16px; width: min(380px, calc(100% - 32px)); max-height: calc(100% - 32px);
+           display: flex; flex-direction: column; font-size: 13px; color: var(--muted); }
+  #steps .fhead { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; cursor: move;
+                  border-bottom: 1px solid var(--border); touch-action: none; user-select: none; }
+  #steps .fhead strong { color: var(--fg); font-size: 13px; }
+  #steps .fhead .spacer { flex: 1; }
+  #steps .fhead button { width: 26px; height: 26px; padding: 0; font-size: 14px; line-height: 1; color: var(--muted); }
+  #steps .fbody { padding: 10px 14px 12px; overflow: auto; min-height: 0; }
+  #steps.collapsed .fbody { display: none; } #steps.collapsed .fhead { border-bottom: 0; }
+  #steps p { margin: 0 0 8px; }
+  #steps ol { margin: 0; padding-left: 20px; } #steps li { margin: 3px 0; } #steps b { color: var(--fg); }
+  #steps .lab { margin-left: 4px; font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+                border-radius: 999px; padding: 0 7px; white-space: nowrap; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; padding-top: 10px;
+            border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 20px; height: 11px; border-radius: 3px; border: 1.5px solid var(--border); display: inline-block; }
+  .legend i.inactive { border-style: dashed; }
+  .legend i.starting { border-color: var(--warn); }
+  .legend i.live { border-color: var(--ok); background: var(--live-bg); }
+  .legend i.run { height: 0; border: 0; border-top: 2px dashed var(--ok); border-radius: 0; }
+  .legend i.fail { height: 0; border: 0; border-top: 2px solid var(--err); border-radius: 0; }
+  #zoomCtl { right: 16px; bottom: 16px; display: flex; align-items: center; gap: 2px; padding: 4px; }
+  #zoomCtl button { width: 30px; height: 30px; padding: 0; border: 0; background: none; font-size: 16px; line-height: 1; }
+  #zoomCtl button:hover { background: var(--stmt-bg); }
+  #zoomCtl #zoomFit { width: auto; padding: 0 8px; font-size: 12px; font-weight: 600; }
+  #zoomLevel { min-width: 44px; text-align: center; font: 12px var(--mono); color: var(--muted); }
+  #zoomCtl .sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+  #zoomHint { right: 16px; bottom: 62px; padding: 4px 10px; font-size: 11.5px; color: var(--muted); border-radius: 999px; }
+
+  /* ── The guide: the next step's callout, a ring on its button, explanations on hover ── */
+  #guideBtn { display: inline-flex; align-items: center; gap: 6px; }
+  #guideBtn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent);
+                                   background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+  #guide { width: min(340px, calc(100% - 32px)); padding: 10px 12px 12px; font-size: 13px; z-index: 3;
+           border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+  #guide[hidden] { display: none; }
+  #guide .ghead { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted);
+                  text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+  #guide .ghead .spacer { flex: 1; }
+  #guide .ghead .lab { text-transform: none; letter-spacing: 0; font-weight: 500; border: 1px solid var(--border);
+                       border-radius: 999px; padding: 0 7px; }
+  #guide .ghead button { width: 22px; height: 22px; padding: 0; border: 0; background: none; color: var(--muted); font-size: 13px; }
+  #guide .ghead button:hover { color: var(--fg); }
+  #guide h3 { margin: 6px 0 4px; font-size: 14px; color: var(--fg); }
+  #guide p { margin: 0 0 6px; color: var(--muted); line-height: 1.45; }
+  #guide p b { color: var(--fg); font-weight: 600; }
+  #guide .look { padding-left: 8px; border-left: 2px solid var(--ok); }
+  #guide .wait { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 6px;
+                 background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--fg); }
+  #guide .wait .spinner { flex: none; margin-top: 2px; }
+  #guide .gact { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  #guide .gact button { padding: 4px 12px; font-size: 12.5px; }
+  #guide .gact .spacer { flex: 1; }
+  #guide .gact a { font-size: 12px; color: var(--muted); cursor: pointer; }
+  #guide .gact a:hover { color: var(--fg); }
+  #guide .bar { height: 3px; border-radius: 2px; background: var(--border); margin-top: 10px; overflow: hidden; }
+  #guide .bar i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  #guideRing { fill: none; stroke: var(--accent); stroke-width: 2.5; pointer-events: none;
+               animation: ring 1.4s ease-in-out infinite; }
+  #guideRing[hidden] { display: none; }
+  @keyframes ring { 50% { stroke-opacity: .25; stroke-width: 5; } }
+  @media (prefers-reduced-motion: reduce) { #guideRing { animation: none; } }
+  #guideLink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; overflow: visible; }
+  #guideLink line { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 4; }
+  #guideLink circle { fill: var(--accent); }
+  #guideLink[hidden] { display: none; }
+  #gtip { position: fixed; z-index: 30; max-width: 320px; padding: 8px 10px; pointer-events: none;
+          background: var(--panel); color: var(--muted); border: 1px solid var(--border); border-radius: 8px;
+          box-shadow: 0 6px 24px rgba(0,0,0,.22); font-size: 12px; line-height: 1.45; }
+  #gtip[hidden] { display: none; }
+  #gtip b { display: block; color: var(--fg); font-size: 12.5px; margin-bottom: 2px; }
+  #gtip .act { color: var(--accent); }
+  /* The suggested steps follow the guide: done ones ticked, the current one marked. */
+  body.guided #steps li.done { opacity: .6; }
+  body.guided #steps li.done::marker { content: "✓  "; color: var(--ok); }
+  body.guided #steps li.now { color: var(--fg); }
+  body.guided #steps li.now::marker { color: var(--accent); font-weight: 700; }
+
+  /* ── The welcome pop-up: guided or not, asked on the first visit ── */
+  #welcome { width: min(560px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--border); border-radius: 12px;
+             background: var(--panel); color: var(--fg); box-shadow: 0 12px 48px rgba(0,0,0,.35); }
+  #welcome::backdrop { background: rgba(10, 12, 16, .55); }
+  #welcome .wbody { padding: 22px 24px 20px; }
+  #welcome h2 { margin: 0 0 6px; font-size: 18px; }
+  #welcome p { margin: 0 0 16px; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+  #welcome .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 520px) { #welcome .choices { grid-template-columns: 1fr; } }
+  #welcome .choice { display: flex; flex-direction: column; gap: 6px; text-align: left; padding: 14px;
+                     border-radius: 10px; border: 1px solid var(--border); background: var(--bg); }
+  #welcome .choice:hover, #welcome .choice:focus-visible { border-color: var(--accent); outline: none; }
+  #welcome .choice.rec { border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+                         background: color-mix(in srgb, var(--accent) 8%, var(--panel)); }
+  #welcome .choice b { font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  #welcome .choice span { color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+  #welcome .choice .wicon { width: 18px; height: 18px; color: var(--accent); }
+  #welcome .later { margin: 14px 0 0; font-size: 12px; }
+
+  /* ── The action pop-up ── */
+  #act { width: min(960px, calc(100vw - 32px)); max-height: min(90vh, 1000px); padding: 0;
+         border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--fg);
+         box-shadow: 0 12px 48px rgba(0,0,0,.35); }
+  #act[open] { display: flex; flex-direction: column; }
+  #act::backdrop { background: rgba(10, 12, 16, .55); }
+  #act header { padding: 10px 14px; gap: 10px; flex-wrap: nowrap; }
+  #act header h2 { font: 600 14px var(--mono); margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip { flex: none; font: 600 10px/1 var(--mono); letter-spacing: .03em; padding: 4px 6px; border-radius: 4px;
+          border: 1px solid var(--border); color: var(--muted); }
+  .chip.live { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+  .chip.starting { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+  .chip.failing { color: var(--err); border-color: color-mix(in srgb, var(--err) 50%, transparent); }
+  #act .abody { overflow: auto; padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  #act .about { margin: 0; color: var(--muted); font-size: 13px; }
+  #act .note { margin: 0; padding: 8px 10px; border-radius: 6px; font-size: 13px;
+               background: var(--stmt-bg); border-left: 3px solid var(--warn); }
+  #act .note.ok { border-left-color: var(--ok); } #act .note.err { border-left-color: var(--err); }
+  #act .note a { color: var(--accent); }
+  #act .sqlhead { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); }
+  #act .sqlhead .spacer { flex: 1; }
+  #act .sqlhead a { color: var(--accent); cursor: pointer; }
+  #act .CodeMirror { height: auto; max-height: 300px; border: 1px solid var(--border); border-radius: 6px;
+                     background: var(--panel); color: var(--fg); font: 12.5px/1.5 var(--mono); }
+  #act .CodeMirror-scroll { max-height: 300px; min-height: 60px; }
+  #act .CodeMirror-gutters { background: var(--panel); border-right: 1px solid var(--border); }
+  #act .CodeMirror-linenumber { color: var(--muted); }
+  #act .CodeMirror-cursor { border-left-color: var(--fg); }
+  #act .CodeMirror-selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  #act .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #act .actions .spacer { flex: 1; }
+  #act .actions .hint { font-size: 12px; color: var(--muted); }
+  /* Results: one compact block per statement */
+  .res { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .res .rhead { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; background: var(--stmt-bg);
+                border-left: 3px solid var(--accent); font-size: 12px; }
+  .res.done .rhead { border-left-color: var(--ok); } .res.fail .rhead { border-left-color: var(--err); }
+  .res .rstmt { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+  .res .rstate { color: var(--muted); white-space: nowrap; }
+  .res.done .rstate { color: var(--ok); } .res.fail .rstate { color: var(--err); }
+  .res .rstate a { color: var(--accent); margin-right: 6px; }
+  .res .grid { max-height: 280px; overflow: auto; }
+  /* Always-visible scrollbars: macOS otherwise hides them until you scroll. Styling the
+     WebKit scrollbar turns off the overlay kind; Firefox gets the standard properties
+     (set only there, since in Chrome they would override the WebKit styling). */
+  .res .grid::-webkit-scrollbar { width: 10px; height: 10px; }
+  .res .grid::-webkit-scrollbar-track { background: var(--stmt-bg); }
+  .res .grid::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 5px; border: 2px solid var(--stmt-bg); }
+  .res .grid::-webkit-scrollbar-thumb:hover { background: var(--fg); }
+  .res .grid::-webkit-scrollbar-corner { background: var(--stmt-bg); }
+  @supports not selector(::-webkit-scrollbar) { .res .grid { scrollbar-color: var(--muted) var(--stmt-bg); } }
+  .res table { border-collapse: collapse; font: 12px var(--mono); width: max-content; min-width: 100%; }
+  .res th, .res td { padding: 3px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  .res th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
+  .res td.null { color: var(--muted); font-style: italic; }
+  .res .err { padding: 8px 10px; color: var(--err); background: var(--err-bg); font-size: 12.5px; white-space: pre-wrap; }
+  .res .empty { padding: 8px 10px; color: var(--muted); font-size: 12.5px; }
+  .res .waiting { padding: 8px 10px; }
+</style>
+</head>
+<body>
+<header>
+  <button id="catalogToggle" type="button" aria-controls="catalog" aria-expanded="false"
+          title="Browse catalogs, databases and tables"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"
+    fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>
+    <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>Catalog</button>
+  <h1>Pipeline Builder</h1>
+  <span id="status">connecting…</span>
+  <div class="wmenu">
+    <button type="button" id="wmenuBtn" aria-haspopup="menu" aria-expanded="false" aria-controls="wmenu">
+      <svg class="wicon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      Components <span aria-hidden="true">▾</span></button>
+    <div class="wlist" id="wmenu" role="menu" aria-label="Environment components" hidden></div>
+  </div>
+  <button id="guideBtn" type="button" aria-pressed="false" title="Guide: point to the next step, and explain every box and button on hover">
+    <svg class="wicon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/></svg>
+    Guide</button>
+  <button id="theme" type="button"></button>
+</header>
+
+<div id="layout">
+<div id="stage" class="arch" tabindex="0" aria-label="Pipeline diagram: drag to pan, scroll or pinch to zoom, + and - keys to zoom, 0 to reset the view">
+    <svg id="diagram" viewBox="0 0 1350 540" preserveAspectRatio="xMidYMid meet" role="group" aria-label="Pipeline diagram. Boxes are tables and Flink jobs; each has buttons on or below it.">
+      <defs>
+        <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="head-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-ok" d="M0,0 L10,5 L0,10 z"/></marker>
+        <!-- Technology marks: Simple Icons (CC0), drawn in the text colour so they read in both themes. -->
+        <symbol id="i-kafka" viewBox="0 0 24 24"><path d="M9.71 2.136a1.43 1.43 0 0 0-2.047 0h-.007a1.48 1.48 0 0 0-.421 1.042c0 .41.161.777.422 1.039l.007.007c.257.264.616.426 1.019.426.404 0 .766-.162 1.027-.426l.003-.007c.261-.262.421-.629.421-1.039 0-.408-.159-.777-.421-1.042H9.71zM8.683 22.295c.404 0 .766-.167 1.027-.429l.003-.008c.261-.261.421-.631.421-1.036 0-.41-.159-.778-.421-1.044H9.71a1.42 1.42 0 0 0-1.027-.432 1.4 1.4 0 0 0-1.02.432h-.007c-.26.266-.422.634-.422 1.044 0 .406.161.775.422 1.036l.007.008c.258.262.617.429 1.02.429zm7.89-4.462c.359-.096.683-.33.882-.684l.027-.052a1.47 1.47 0 0 0 .114-1.067 1.454 1.454 0 0 0-.675-.896l-.021-.014a1.425 1.425 0 0 0-1.078-.132c-.36.091-.684.335-.881.686-.2.349-.241.75-.146 1.119.099.363.33.691.675.896h.002c.346.203.737.239 1.101.144zm-6.405-7.342a2.083 2.083 0 0 0-1.485-.627c-.58 0-1.103.242-1.482.627-.378.385-.612.916-.612 1.507s.233 1.124.612 1.514a2.08 2.08 0 0 0 2.967 0c.379-.39.612-.923.612-1.514s-.233-1.122-.612-1.507zm-.835-2.51c.843.141 1.6.552 2.178 1.144h.004c.092.093.182.196.265.299l1.446-.851a3.176 3.176 0 0 1-.047-1.808 3.149 3.149 0 0 1 1.456-1.926l.025-.016a3.062 3.062 0 0 1 2.345-.306c.77.21 1.465.721 1.898 1.482v.002c.431.757.518 1.626.313 2.408a3.145 3.145 0 0 1-1.456 1.928l-.198.118h-.02a3.095 3.095 0 0 1-2.154.201 3.127 3.127 0 0 1-1.514-.944l-1.444.848a4.162 4.162 0 0 1 0 2.879l1.444.846c.413-.47.939-.789 1.514-.944a3.041 3.041 0 0 1 2.371.319l.048.023v.002a3.17 3.17 0 0 1 1.408 1.906 3.215 3.215 0 0 1-.313 2.405l-.026.053-.003-.005a3.147 3.147 0 0 1-1.867 1.436 3.096 3.096 0 0 1-2.371-.318v-.006a3.156 3.156 0 0 1-1.456-1.927 3.175 3.175 0 0 1 .047-1.805l-1.446-.848a3.905 3.905 0 0 1-.265.294l-.004.005a3.938 3.938 0 0 1-2.178 1.138v1.699a3.09 3.09 0 0 1 1.56.862l.002.004c.565.572.914 1.368.914 2.243 0 .873-.35 1.664-.914 2.239l-.002.009a3.1 3.1 0 0 1-2.21.931 3.1 3.1 0 0 1-2.206-.93h-.002v-.009a3.186 3.186 0 0 1-.916-2.239c0-.875.35-1.672.916-2.243v-.004h.002a3.1 3.1 0 0 1 1.558-.862v-1.699a3.926 3.926 0 0 1-2.176-1.138l-.006-.005a4.098 4.098 0 0 1-1.173-2.874c0-1.122.452-2.136 1.173-2.872h.006a3.947 3.947 0 0 1 2.176-1.144V6.289a3.137 3.137 0 0 1-1.558-.864h-.002v-.004a3.192 3.192 0 0 1-.916-2.243c0-.871.35-1.669.916-2.243l.002-.002A3.084 3.084 0 0 1 8.683 0c.861 0 1.641.355 2.21.932v.002h.002c.565.574.914 1.372.914 2.243 0 .876-.35 1.667-.914 2.243l-.002.005a3.142 3.142 0 0 1-1.56.864v1.692zm8.121-1.129l-.012-.019a1.452 1.452 0 0 0-.87-.668 1.43 1.43 0 0 0-1.103.146h.002c-.347.2-.58.529-.677.896-.095.365-.054.768.146 1.119l.007.009c.2.347.519.579.874.673.357.103.755.059 1.098-.144l.019-.009a1.47 1.47 0 0 0 .657-.885 1.493 1.493 0 0 0-.141-1.118"/></symbol>
+        <symbol id="i-postgres" viewBox="0 0 24 24"><path d="M23.5594 14.7228a.5269.5269 0 0 0-.0563-.1191c-.139-.2632-.4768-.3418-1.0074-.2321-1.6533.3411-2.2935.1312-2.5256-.0191 1.342-2.0482 2.445-4.522 3.0411-6.8297.2714-1.0507.7982-3.5237.1222-4.7316a1.5641 1.5641 0 0 0-.1509-.235C21.6931.9086 19.8007.0248 17.5099.0005c-1.4947-.0158-2.7705.3461-3.1161.4794a9.449 9.449 0 0 0-.5159-.0816 8.044 8.044 0 0 0-1.3114-.1278c-1.1822-.0184-2.2038.2642-3.0498.8406-.8573-.3211-4.7888-1.645-7.2219.0788C.9359 2.1526.3086 3.8733.4302 6.3043c.0409.818.5069 3.334 1.2423 5.7436.4598 1.5065.9387 2.7019 1.4334 3.582.553.9942 1.1259 1.5933 1.7143 1.7895.4474.1491 1.1327.1441 1.8581-.7279.8012-.9635 1.5903-1.8258 1.9446-2.2069.4351.2355.9064.3625 1.39.3772a.0569.0569 0 0 0 .0004.0041 11.0312 11.0312 0 0 0-.2472.3054c-.3389.4302-.4094.5197-1.5002.7443-.3102.064-1.1344.2339-1.1464.8115-.0025.1224.0329.2309.0919.3268.2269.4231.9216.6097 1.015.6331 1.3345.3335 2.5044.092 3.3714-.6787-.017 2.231.0775 4.4174.3454 5.0874.2212.5529.7618 1.9045 2.4692 1.9043.2505 0 .5263-.0291.8296-.0941 1.7819-.3821 2.5557-1.1696 2.855-2.9059.1503-.8707.4016-2.8753.5388-4.1012.0169-.0703.0357-.1207.057-.1362.0007-.0005.0697-.0471.4272.0307a.3673.3673 0 0 0 .0443.0068l.2539.0223.0149.001c.8468.0384 1.9114-.1426 2.5312-.4308.6438-.2988 1.8057-1.0323 1.5951-1.6698zM2.371 11.8765c-.7435-2.4358-1.1779-4.8851-1.2123-5.5719-.1086-2.1714.4171-3.6829 1.5623-4.4927 1.8367-1.2986 4.8398-.5408 6.108-.13-.0032.0032-.0066.0061-.0098.0094-2.0238 2.044-1.9758 5.536-1.9708 5.7495-.0002.0823.0066.1989.0162.3593.0348.5873.0996 1.6804-.0735 2.9184-.1609 1.1504.1937 2.2764.9728 3.0892.0806.0841.1648.1631.2518.2374-.3468.3714-1.1004 1.1926-1.9025 2.1576-.5677.6825-.9597.5517-1.0886.5087-.3919-.1307-.813-.5871-1.2381-1.3223-.4796-.839-.9635-2.0317-1.4155-3.5126zm6.0072 5.0871c-.1711-.0428-.3271-.1132-.4322-.1772.0889-.0394.2374-.0902.4833-.1409 1.2833-.2641 1.4815-.4506 1.9143-1.0002.0992-.126.2116-.2687.3673-.4426a.3549.3549 0 0 0 .0737-.1298c.1708-.1513.2724-.1099.4369-.0417.156.0646.3078.26.3695.4752.0291.1016.0619.2945-.0452.4444-.9043 1.2658-2.2216 1.2494-3.1676 1.0128zm2.094-3.988-.0525.141c-.133.3566-.2567.6881-.3334 1.003-.6674-.0021-1.3168-.2872-1.8105-.8024-.6279-.6551-.9131-1.5664-.7825-2.5004.1828-1.3079.1153-2.4468.079-3.0586-.005-.0857-.0095-.1607-.0122-.2199.2957-.2621 1.6659-.9962 2.6429-.7724.4459.1022.7176.4057.8305.928.5846 2.7038.0774 3.8307-.3302 4.7363-.084.1866-.1633.3629-.2311.5454zm7.3637 4.5725c-.0169.1768-.0358.376-.0618.5959l-.146.4383a.3547.3547 0 0 0-.0182.1077c-.0059.4747-.054.6489-.115.8693-.0634.2292-.1353.4891-.1794 1.0575-.11 1.4143-.8782 2.2267-2.4172 2.5565-1.5155.3251-1.7843-.4968-2.0212-1.2217a6.5824 6.5824 0 0 0-.0769-.2266c-.2154-.5858-.1911-1.4119-.1574-2.5551.0165-.5612-.0249-1.9013-.3302-2.6462.0044-.2932.0106-.5909.019-.8918a.3529.3529 0 0 0-.0153-.1126 1.4927 1.4927 0 0 0-.0439-.208c-.1226-.4283-.4213-.7866-.7797-.9351-.1424-.059-.4038-.1672-.7178-.0869.067-.276.1831-.5875.309-.9249l.0529-.142c.0595-.16.134-.3257.213-.5012.4265-.9476 1.0106-2.2453.3766-5.1772-.2374-1.0981-1.0304-1.6343-2.2324-1.5098-.7207.0746-1.3799.3654-1.7088.5321a5.6716 5.6716 0 0 0-.1958.1041c.0918-1.1064.4386-3.1741 1.7357-4.4823a4.0306 4.0306 0 0 1 .3033-.276.3532.3532 0 0 0 .1447-.0644c.7524-.5706 1.6945-.8506 2.802-.8325.4091.0067.8017.0339 1.1742.081 1.939.3544 3.2439 1.4468 4.0359 2.3827.8143.9623 1.2552 1.9315 1.4312 2.4543-1.3232-.1346-2.2234.1268-2.6797.779-.9926 1.4189.543 4.1729 1.2811 5.4964.1353.2426.2522.4522.2889.5413.2403.5825.5515.9713.7787 1.2552.0696.087.1372.1714.1885.245-.4008.1155-1.1208.3825-1.0552 1.717-.0123.1563-.0423.4469-.0834.8148-.0461.2077-.0702.4603-.0994.7662zm.8905-1.6211c-.0405-.8316.2691-.9185.5967-1.0105a2.8566 2.8566 0 0 0 .135-.0406 1.202 1.202 0 0 0 .1342.103c.5703.3765 1.5823.4213 3.0068.1344-.2016.1769-.5189.3994-.9533.6011-.4098.1903-1.0957.333-1.7473.3636-.7197.0336-1.0859-.0807-1.1721-.151zm.5695-9.2712c-.0059.3508-.0542.6692-.1054 1.0017-.055.3576-.112.7274-.1264 1.1762-.0142.4368.0404.8909.0932 1.3301.1066.887.216 1.8003-.2075 2.7014a3.5272 3.5272 0 0 1-.1876-.3856c-.0527-.1276-.1669-.3326-.3251-.6162-.6156-1.1041-2.0574-3.6896-1.3193-4.7446.3795-.5427 1.3408-.5661 2.1781-.463zm.2284 7.0137a12.3762 12.3762 0 0 0-.0853-.1074l-.0355-.0444c.7262-1.1995.5842-2.3862.4578-3.4385-.0519-.4318-.1009-.8396-.0885-1.2226.0129-.4061.0666-.7543.1185-1.0911.0639-.415.1288-.8443.1109-1.3505.0134-.0531.0188-.1158.0118-.1902-.0457-.4855-.5999-1.938-1.7294-3.253-.6076-.7073-1.4896-1.4972-2.6889-2.0395.5251-.1066 1.2328-.2035 2.0244-.1859 2.0515.0456 3.6746.8135 4.8242 2.2824a.908.908 0 0 1 .0667.1002c.7231 1.3556-.2762 6.2751-2.9867 10.5405zm-8.8166-6.1162c-.025.1794-.3089.4225-.6211.4225a.5821.5821 0 0 1-.0809-.0056c-.1873-.026-.3765-.144-.5059-.3156-.0458-.0605-.1203-.178-.1055-.2844.0055-.0401.0261-.0985.0925-.1488.1182-.0894.3518-.1226.6096-.0867.3163.0441.6426.1938.6113.4186zm7.9305-.4114c.0111.0792-.049.201-.1531.3102-.0683.0717-.212.1961-.4079.2232a.5456.5456 0 0 1-.075.0052c-.2935 0-.5414-.2344-.5607-.3717-.024-.1765.2641-.3106.5611-.352.297-.0414.6111.0088.6356.1851z"/></symbol>
+        <symbol id="i-flink" viewBox="0 0 24 24"><path d="M3.192 13.236c.028.035.064.069.098.101l.024.022.008.004a.736.736 0 0 0 .179.065 8.117 8.117 0 0 1-.138-1.758c.027-.797.178-1.47.462-2.059a8.02 8.02 0 0 1 .315-.519s-.176 1.202-.202 1.673a7.104 7.104 0 0 0 .16 1.868l.072-.05c-.043-.389-.042-.8.004-1.22a6.987 6.987 0 0 1 .419-1.721 9.266 9.266 0 0 1 .973-1.892c-1.985.209-2.418 2.1-2.418 2.1s.017-.347.024-.434c.057-.649.123-.961.205-1.287-.13.238-.212.488-.271.688-.139.47-.216.949-.273 1.356a9.022 9.022 0 0 0-.096 1.289c.002.38.024.828.176 1.263.073.205.164.373.279.511zm1.44-.737c.179-.113.385-.2.626-.268.425-.119.889-.239 1.461-.379l.19-.046c.478-.116.974-.237 1.439-.415.283-.108.552-.25.824-.436.38-.26.721-.579 1.012-.951.154-.196.232-.349.309-.605l.114-.378s.464.519-.004 1.436c.297-.107.582-.413.798-.788.181-.315.491-1.451.491-1.451s.569.875-.105 2.011a1.59 1.59 0 0 0 .356-.227c2.507-2.49.349-3.899-.103-4.236a4.141 4.141 0 0 0-.982-.525L11 5.218c-.03-.013-.047-.033-.055-.042l-.321-.35.563.155c.079.021.154.042.228.064.614.182 1.082.4 1.472.686.445.325 2.142 1.751.348 3.837.556-.191 1.606-.772 1.962-1.272 1.713-2.405-.254-3.808-.17-3.808.019 0 .044.002.099.01a.44.44 0 0 0 .069.006c.036 0 .097-.006.109-.041.015-.042-.014-.122-.073-.168-.154-.117-.321-.202-.533-.169C12.926 4.4 12.3 3.85 12.3 3.85s2.482.129 2.562-.28a4.92 4.92 0 0 0-1.225-.912 6.697 6.697 0 0 0-2.228-.743c-1.207-.179-2.13.053-2.13.053.096-.121.574-.667 2.556-.511.802.063 1.564.316 2.27.669.182.091.29-.125.293-.223.004-.114.201.379.203.405.019-.049.096-.308.112-.308.047 0 .24.603.24.603.002-.024.257-.286.257-.286.076.343.066.514.047.562.002-.009.267-.172.267-.172s.152.638.412.891c.084.082.238.296.328.527.19-.133.421-.799.421-.799s.119.353.019.988c.007-.008.301-.219.301-.219s.042.449-.15 1.008a.572.572 0 0 0-.022.095c.162-.091.404-.388.404-.388l-.042.188c-.048.214-.137.629-.327.953a2.549 2.549 0 0 0-.29.686c.049-.045.099-.085.152-.12.1-.065.199-.117.293-.151l.232-.085c.392-.142.788-.309 1.173-.479.812-.359.631-.86.631-.86-.209.408-.966.816-.966.816s.98-.878.562-1.905c-.115.27-.224.538-.327.792-.144.353-.314.726-.59 1.055-.141.168-.286.29-.446.373a.686.686 0 0 1-.115.048l-.043.016s.172-.283.184-1.063c.004-.282.012-.571.012-.826v-.054c0-.132-.003-.263-.002-.395.005-.558.015-.982.132-1.373-.012-.022-.005-.045-.018-.068-.027-.046-.047-.099-.071-.157-.036-.089-.066-.178-.101-.275-.127-.36-.308-.538-.365-.588-.038.115-.271.591-.271.591s.001-.365-.001-.393c-.067-.511-1.33-.972-1.356-.988l.067.401s-.382-.028-.545-.284c-.034-.052-.084-.09-.13-.125l.09.306.093.214s-.296-.024-.435-.269c-.033-.057-.075-.121-.112-.189a.746.746 0 0 0-.574-.396 8.393 8.393 0 0 0-.601-.062 1.301 1.301 0 0 1-.479-.11L12.573 0l.046.087c.015.029.025.058.04.095l.008.022.032.078.048.172s-.353-.014-.765-.299c-.089-.062-.201-.062-.325-.072L11.622.08a4.192 4.192 0 0 0-.332-.014 3.097 3.097 0 0 0-.974.149c.035-.002.071-.003.106-.003l.067.001c.677.012.887.413.887.413s-.606 0-.785.023c-.209.027-.42.052-.616.106a5.102 5.102 0 0 0-1.622.796c-.124.088-.253.17-.389.256-.23.147-.424.341-.576.577a.357.357 0 0 0-.034.068c-.014.036-.008.039.015.051a.78.78 0 0 0 .168.061 2.353 2.353 0 0 1 1.786 2.005l.015.123c.035.307.072.623.056.944a3.413 3.413 0 0 1-.901 2.191c-.59.646-1.323.69-1.316.685.435-.406.722-.95.876-1.66a1.395 1.395 0 0 0-.084-.828.868.868 0 0 0-.016.047c-.097.276-.22.594-.447.857-.132.15-.312.322-.521.521-.911.867-2.435 2.317-2.409 4.623 0 .135.027.3.056.427zm13.967-5.836c-.113.098-.226.196-.341.292-.205.171-.351.28-.666.394-.276.099-.488-.124-.488-.124a1.3 1.3 0 0 0 .447-.389 7.968 7.968 0 0 0-1.154.71 2.41 2.41 0 0 0-.389.353c-.124.156-.205.318-.205.484v.002c0-.003.044-.005.053-.007a6.122 6.122 0 0 0 1.226-.49 16.006 16.006 0 0 0 1.757-1.074.334.334 0 0 1 .095-.048l.371-.106-.228.314a.288.288 0 0 1-.027.034c-.745.741-1.517 1.272-2.36 1.622a4.734 4.734 0 0 1-.492.174 9.201 9.201 0 0 0 1.513-.525c.537-.244.913-.483 1.22-.772.475-.45.814-.981 1.009-1.576a.732.732 0 0 0 .024-.1l-.111.033c-.127.037-.258.074-.373.13a2.367 2.367 0 0 0-.427.286c-.158.127-.321.269-.454.383zM1.578 14.987c.128.205.268.407.403.602l.021.031c-.351-1.236.223-1.982.223-1.982l.142.391c.036.101.091.199.167.302.147-.275.326-.538.534-.784a1.438 1.438 0 0 1-.472-.415c-.2-.264-.332-.581-.415-.996a5.507 5.507 0 0 1-.069-1.562c.015-.174.036-.348.059-.525a8.377 8.377 0 0 0-1.626 2.716.046.046 0 0 0 .003.021 9.438 9.438 0 0 0 1.03 2.201zM18.221 3.353a5.045 5.045 0 0 1 .366-1.933l.018-.041a.94.94 0 0 0-.246.252c-.168.242-.291.53-.397.932-.182.687-.29 1.427-.337 2.308.192-.205.507-.657.572-1.215.011-.094.024-.199.024-.303zm3.368 19.012c-.396-.065-1.234-.36-1.468-.945-.288.707.306 1.221.75 1.451.077.04.1.05.181.082.084.037-.165.494.045.704.21.21.409.148.487.148 0 0 .361.335.567.111.053-.058.098-.262.029-.385-.086-.152-.295-.124-.315-.124-.41.005-.373-.188-.311-.27.045-.059.132-.055.205-.055.017 0 .034.001.053.004.094.011.184.016.268.016.335 0 .726-.035.985-.179.186-.104.491-.456.475-.692-.017.006-.825.319-1.951.134zm2.324-7.785c-.038-.097-.085-.196-.126-.283l-.06-.126c-.021-.047-.044-.093-.066-.139-.055-.111-.112-.226-.151-.35-.034-.106-.043-.216-.052-.32a3.312 3.312 0 0 0-1.886-2.716 1.25 1.25 0 0 1-.215.417c-.09.12-.144.138-.262.138-.157 0-.18-.18-.133-.265a1.45 1.45 0 0 0 .196-.543c.033-.377-.177-.786-.435-1.068-.239-.261-.649-.564-.979-.663-.079.307.017.812.124 1.109.132.36.544 1.069.445 1.499 0 0-.029.275-.304.448-.153.096-.215.053-.215.053.294-.627.297-.891-.028-1.485-.245-.447-.358-.899-.27-1.398.003-.02.01-.04.014-.06a2.222 2.222 0 0 1-.088.199c-.25.439-.486.667-.628 1.121-.149.508.01 1.059.325 1.598a1.237 1.237 0 0 1-.553-.804 4.323 4.323 0 0 0-1.334 1.166c-.08.104-.175.191-.259.268a4.92 4.92 0 0 1-1.978 1.099c-.493.145-1.001.267-1.502.388l-.131.031c-.683.165-1.409.351-2.097.657-.792.352-1.42.757-1.918 1.239a4.412 4.412 0 0 0-1.326 2.593c-.114.781-.055 1.595.18 2.49.008.032-1.03-.941-.494-3.741a6.322 6.322 0 0 0-.236-.007l-.067.001c-1.933.058-2.737 1.123-2.737 1.123s.126-1.182 1.987-1.579c.14-.03 1.312-.293 1.352-.306.154-.314.341-.612.557-.889l-.166.026c-.319.05-.648.1-.975.143l-.252.03c-.577.074-1.174.149-1.74.316-.594.174-1.059.426-1.422.768-.389.366-.668.839-.852 1.442l-.023.086c-.013.05-.026.101-.045.151-.02.052-.024.11.018.22.348.923.945 1.723 1.774 2.376a7.587 7.587 0 0 0 2.146 1.18c.026.009.07.024.109.064l.348.337-.544-.13c-.064-.015-.127-.029-.191-.047-1.114-.306-2.085-.821-2.885-1.532-.273-.099-1.668-.794-2.26-1.936l-.099-.19s.757.746 1.288.855a5.59 5.59 0 0 1-.564-1.22.283.283 0 0 0-.049-.087C1.273 17.196.624 16.054.196 14.834a4.708 4.708 0 0 1-.085-.262c-.043.355-.064.71-.064 1.057 0 .11.955 2.647.955 2.647s-.42-.467-.768-1.059c0 0-.061-.199-.069-.212.149.897.439 1.74.863 2.521 1.167 2.147 2.956 3.554 5.47 4.212a7.73 7.73 0 0 0 1.955.255l7.855.007c.369 0 .652-.022.915-.07l.041-.007a1.47 1.47 0 0 1 .281-.034c.106.001.219.014.345.044l.062.015c.116.026.224.052.331.052 1.32.01 1.137-.785 1.137-.785-.055-.207-.295-.351-.557-.413a1.204 1.204 0 0 0-.28-.033c-.179 0-.367.041-.559.12l-.288.123-.172.075a1.317 1.317 0 0 1-.098.038.54.54 0 0 1-.17.036c-.199 0-.208-.195-.213-.312a.46.46 0 0 1 .169-.373c.093-.079.194-.156.302-.228.195-.132.396-.268.551-.446a1.49 1.49 0 0 0 .361-.699.825.825 0 0 0-.044-.469c-.014-.035-.027-.042-.04-.046a9.037 9.037 0 0 0-.368-.112c-.488-.137-.847-.342-1.127-.643a2.803 2.803 0 0 1-.439-.671 5.783 5.783 0 0 1-.416-1.096c-.159-.601-.536-1.083-1.15-1.472a3.536 3.536 0 0 0-1.557-.524c-.137-.015-.276-.021-.423-.028-.037-.002-.122-.013-.208-.024-.077-.01-.153-.021-.188-.022l-.21-.013s.054-.076.489-.242c.082-.031.167-.039.25-.054.201-.035.4-.053.59-.053.458 0 .891.106 1.288.314.494.26.888.656 1.206 1.211.173.302.309.626.416.992.021.07.038.14.058.216.035.134.071.271.122.396.307.756.876 1.198 1.69 1.315.216.031.426.046.626.046a3.48 3.48 0 0 0 1.077-.165c.455-.149.803-.382 1.062-.712a1.42 1.42 0 0 0 .255-.494l.035-.121.203.048c.043.011.086.021.13.03a.483.483 0 0 0 .094.009c.092 0 .186-.022.288-.044l.017-.004c.076-.017.15-.02.222-.023l.061-.003c.072 0 .132.048.159.093.031.053.081.083.175.104a.367.367 0 0 0 .075.007c.229 0 .47-.21.476-.416.003-.079-.018-.127-.07-.163-.041-.028-.083-.054-.131-.084l-.228-.143.152-.116a.245.245 0 0 1 .147-.051c.045 0 .085.013.12.028 0 0-.191-1.01-1.527-.716 0 0-.217.089-.328.131l-.052.02a.27.27 0 0 1-.101.019.358.358 0 0 1-.166-.047c-.468-.235-.926-.131-1.002-.131a2.28 2.28 0 0 1-.538-.059.222.222 0 0 1-.116-.067l-.086-.097a2.634 2.634 0 0 1-1.183-.197c-.436-.186-.784-.47-.995-.903a1.487 1.487 0 0 1-.15-.685l.026.067c.084.248.208.474.374.678.306.379.701.634 1.15.813.243.097.495.165.764.21 0 0 .955.036 1.38-.317.323-.18.614-.264.917-.264h.063c1.027-.001 1.118-.498 1.118-.498s.117.076.281.051a.666.666 0 0 0 .604-.63l-.34-.306-.072-.063-.134-.106.092-.105a.274.274 0 0 1 .207-.099c.046 0 .091.012.134.035.061.034.115.077.164.117l.051.04.064.05a.559.559 0 0 0-.036-.265zm-1.267-.273c-.038.106-.088.123-.199.099a.688.688 0 0 0-.181-.014c-.111.005-.221.024-.332.026-.277.005-.543-.045-.763-.225-.312-.256-.372-.559-.177-.943l.004.037a.745.745 0 0 0 .345.611c.18.121.385.17.595.196.17.021.338.05.487.142l.041.021a.043.043 0 0 1 .006-.007c-.029-.041-.039-.183-.024-.242a.565.565 0 0 0 .002-.297.622.622 0 0 1-.25.304.076.076 0 0 1-.053.02 2.53 2.53 0 0 1-.654-.233c-.186-.102-.283-.261-.234-.484a.198.198 0 0 0-.056-.189c-.023-.023-.043-.05-.067-.078.055-.051.102-.1.155-.143.05-.04.102-.078.158-.109.432-.245 1.016-.061 1.208.389.049.114.075.24.089.363.028.259-.013.511-.1.756zm-20.67 2.926c-.02-.237-.033-.474-.046-.756a.102.102 0 0 0-.021-.064c-.63-.909-1.089-1.696-1.446-2.476a7.292 7.292 0 0 1-.169-.394 7.748 7.748 0 0 0 1.682 3.694v-.004zm18.991 4.103c.176.117.395.203.732.287.34.085.653.125.966.125.185 0 .334-.019.47-.059a.81.81 0 0 0 .59-.639 6.03 6.03 0 0 0 .128-.713 1.798 1.798 0 0 0-.372-1.323c-.035.031-.07.061-.106.089a1.104 1.104 0 0 1-.198.121.658.658 0 0 1-.291.072.593.593 0 0 1-.281-.072.96.96 0 0 0-.461-.104c-.063 0-.131.005-.208.013-.027.003-.039.009-.054.04-.258.531-.683.908-1.298 1.154l-.017.007-.003.013a1.15 1.15 0 0 0-.001.454c.054.216.185.391.404.535zM14.99 9.512c-.516.525-1.141.958-1.964 1.364-.52.256-1.1.441-1.826.582-.415.081-.829.159-1.243.237l-.086.015-1.056.2c-.929.178-1.92.389-2.872.71-.691.234-1.224.481-1.677.779-.444.291-.75.591-.965.943a2.637 2.637 0 0 0-.146.291 5.696 5.696 0 0 1-.075.159.42.42 0 0 1-.076.114c-.484.473-.69 1.064-.613 1.756.046.416.176.821.395 1.236.127-.846.574-1.492 1.328-1.92.41-.233.863-.403 1.383-.517.526-.117 1.06-.214 1.561-.304l.307-.054c.516-.091 1.051-.184 1.558-.345.12-.038.238-.08.348-.121.147-.055.275-.12.391-.206.141-.105.289-.2.444-.291-.653-.015-1.76-.017-2.104-.019-.77-.004-1.3.06-1.964.312-.694.264-2.676 1.271-2.676 1.271s.985-1.054 2.837-1.844a7.858 7.858 0 0 1 2.928-.53c.275 0 .561.011.872.033.512.038 1.024.075 1.535.11l.014.001c.024 0 .05-.004.075-.011a10.63 10.63 0 0 1 1.572-.325c.175-.025.353-.061.528-.097-.034-.011-.069-.02-.103-.03a1.13 1.13 0 0 1-.118-.044l-.088-.035-.345-.233 1.296.028c.279 0 3.032-.443 4.21-3.723.078-.219.16-.437.223-.676a7.611 7.611 0 0 1-2.669 1.063 7.155 7.155 0 0 1-1.139.121zm4.784-1.871zm1.701 5.622a.27.27 0 1 0 .54 0 .27.27 0 0 0-.54 0z"/></symbol>
+        <symbol id="i-grafana" viewBox="0 0 24 24"><path d="M23.02 10.59a8.578 8.578 0 0 0-.862-3.034 8.911 8.911 0 0 0-1.789-2.445c.337-1.342-.413-2.505-.413-2.505-1.292-.08-2.113.4-2.416.62-.052-.02-.102-.044-.154-.064-.22-.089-.446-.172-.677-.247-.231-.073-.47-.14-.711-.197a9.867 9.867 0 0 0-.875-.161C14.557.753 12.94 0 12.94 0c-1.804 1.145-2.147 2.744-2.147 2.744l-.018.093c-.098.029-.2.057-.298.088-.138.042-.275.094-.413.143-.138.055-.275.107-.41.166a8.869 8.869 0 0 0-1.557.87l-.063-.029c-2.497-.955-4.716.195-4.716.195-.203 2.658.996 4.33 1.235 4.636a11.608 11.608 0 0 0-.607 2.635C1.636 12.677.953 15.014.953 15.014c1.926 2.214 4.171 2.351 4.171 2.351.003-.002.006-.002.006-.005.285.509.615.994.986 1.446.156.19.32.371.488.548-.704 2.009.099 3.68.099 3.68 2.144.08 3.553-.937 3.849-1.173a9.784 9.784 0 0 0 3.164.501h.08l.055-.003.107-.002.103-.005.003.002c1.01 1.44 2.788 1.646 2.788 1.646 1.264-1.332 1.337-2.653 1.337-2.94v-.058c0-.02-.003-.039-.003-.06.265-.187.52-.387.758-.6a7.875 7.875 0 0 0 1.415-1.7c1.43.083 2.437-.885 2.437-.885-.236-1.49-1.085-2.216-1.264-2.354l-.018-.013-.016-.013a.217.217 0 0 1-.031-.02c.008-.092.016-.18.02-.27.011-.162.016-.323.016-.48v-.253l-.005-.098-.008-.135a1.891 1.891 0 0 0-.01-.13c-.003-.042-.008-.083-.013-.125l-.016-.124-.018-.122a6.215 6.215 0 0 0-2.032-3.73 6.015 6.015 0 0 0-3.222-1.46 6.292 6.292 0 0 0-.85-.048l-.107.002h-.063l-.044.003-.104.008a4.777 4.777 0 0 0-3.335 1.695c-.332.4-.592.84-.768 1.297a4.594 4.594 0 0 0-.312 1.817l.003.091c.005.055.007.11.013.164a3.615 3.615 0 0 0 .698 1.82 3.53 3.53 0 0 0 1.827 1.282c.33.098.66.14.971.137.039 0 .078 0 .114-.002l.063-.003c.02 0 .041-.003.062-.003.034-.002.065-.007.099-.01.007 0 .018-.003.028-.003l.031-.005.06-.008a1.18 1.18 0 0 0 .112-.02c.036-.008.072-.013.109-.024a2.634 2.634 0 0 0 .914-.415c.028-.02.056-.041.085-.065a.248.248 0 0 0 .039-.35.244.244 0 0 0-.309-.06l-.078.042c-.09.044-.184.083-.283.116a2.476 2.476 0 0 1-.475.096c-.028.003-.054.006-.083.006l-.083.002c-.026 0-.054 0-.08-.002l-.102-.006h-.012l-.024.006c-.016-.003-.031-.003-.044-.006-.031-.002-.06-.007-.091-.01a2.59 2.59 0 0 1-.724-.213 2.557 2.557 0 0 1-.667-.438 2.52 2.52 0 0 1-.805-1.475 2.306 2.306 0 0 1-.029-.444l.006-.122v-.023l.002-.031c.003-.021.003-.04.005-.06a3.163 3.163 0 0 1 1.352-2.29 3.12 3.12 0 0 1 .937-.43 2.946 2.946 0 0 1 .776-.101h.06l.07.002.045.003h.026l.07.005a4.041 4.041 0 0 1 1.635.49 3.94 3.94 0 0 1 1.602 1.662 3.77 3.77 0 0 1 .397 1.414l.005.076.003.075c.002.026.002.05.002.075 0 .024.003.052 0 .07v.065l-.002.073-.008.174a6.195 6.195 0 0 1-.08.639 5.1 5.1 0 0 1-.267.927 5.31 5.31 0 0 1-.624 1.13 5.052 5.052 0 0 1-3.237 2.014 4.82 4.82 0 0 1-.649.066l-.039.003h-.287a6.607 6.607 0 0 1-1.716-.265 6.776 6.776 0 0 1-3.4-2.274 6.75 6.75 0 0 1-.746-1.15 6.616 6.616 0 0 1-.714-2.596l-.005-.083-.002-.02v-.056l-.003-.073v-.096l-.003-.104v-.07l.003-.163c.008-.22.026-.45.054-.678a8.707 8.707 0 0 1 .28-1.355c.128-.444.286-.872.473-1.277a7.04 7.04 0 0 1 1.456-2.1 5.925 5.925 0 0 1 .953-.763c.169-.111.343-.213.524-.306.089-.05.182-.091.273-.135.047-.02.093-.042.138-.062a7.177 7.177 0 0 1 .714-.267l.145-.045c.049-.015.098-.026.148-.041.098-.029.197-.052.296-.076.049-.013.1-.02.15-.033l.15-.032.151-.028.076-.013.075-.01.153-.024c.057-.01.114-.013.171-.023l.169-.021c.036-.003.073-.008.106-.01l.073-.008.036-.003.042-.002c.057-.003.114-.008.171-.01l.086-.006h.023l.037-.003.145-.007a7.999 7.999 0 0 1 1.708.125 7.917 7.917 0 0 1 2.048.68 8.253 8.253 0 0 1 1.672 1.09l.09.077.089.078c.06.052.114.107.171.159.057.052.112.106.166.16.052.055.107.107.159.164a8.671 8.671 0 0 1 1.41 1.978c.012.026.028.052.04.078l.04.078.075.156c.023.051.05.1.07.153l.065.15a8.848 8.848 0 0 1 .45 1.34.19.19 0 0 0 .201.142.186.186 0 0 0 .172-.184c.01-.246.002-.532-.024-.856z"/></symbol>
+        <!-- No brand mark for Fluss or a plain service: line glyphs. -->
+        <symbol id="i-db" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></g></symbol>
+        <symbol id="i-api" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 8l-4 4 4 4"/><path d="M16 8l4 4-4 4"/><path d="M14 5l-4 14"/></g></symbol>
+        <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+        <marker id="head-err" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-err" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+
+      <!-- Columns, left to right: sources · Flink feature jobs · Fluss · scoring and serving · tools -->
+      <rect class="region sources" x="8" y="20" width="200" height="510" rx="10"/>
+      <text class="region-label sources" x="22" y="42">DATA SOURCES</text>
+      <rect class="region flink" x="244" y="20" width="334" height="510" rx="10"/>
+      <text class="region-label flink" x="258" y="42">APACHE FLINK · feature jobs</text>
+      <rect class="region warehouse" x="600" y="20" width="220" height="510" rx="10"/>
+      <text class="region-label warehouse" x="614" y="42">APACHE FLUSS · online store</text>
+      <rect class="region model" x="842" y="20" width="276" height="510" rx="10"/>
+      <text class="region-label model" x="856" y="42">SCORING &amp; SERVING</text>
+      <rect class="region consumers" x="1140" y="20" width="200" height="510" rx="10"/>
+      <text class="region-label consumers" x="1154" y="42">TOOLS</text>
+
+      <!-- Jobs: the arrows in, the job's box, the arrow out. data-edge matches /api/pipeline/status. -->
+      <g class="job" data-edge="jobA">
+        <polyline class="edge" points="193,82 228,82 228,74 260,74" marker-end="url(#head)"/>
+        <polyline class="edge" points="193,178 228,178 228,86 260,86" marker-end="url(#head)"/>
+        <rect class="box" x="262" y="56" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="268" y="70" width="20" height="20"/>
+        <text class="title" x="294" y="77">A · CDC dimensions</text>
+        <text class="sub" x="294" y="94">kyc_tier, balance, deposits</text>
+        <line class="edge" x1="562" y1="80" x2="618" y2="80" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="jobB1">
+        <polyline class="edge" points="193,274 236,274 236,140 260,140" marker-end="url(#head)"/>
+        <rect class="box" x="262" y="116" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="268" y="130" width="20" height="20"/>
+        <text class="title" x="294" y="137">B1 · bet velocity</text>
+        <text class="sub" x="294" y="154">HOP 10 min · bets_last_10min</text>
+        <line class="edge" x1="562" y1="140" x2="618" y2="140" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="jobB2">
+        <polyline class="edge" points="193,274 236,274 236,200 260,200" marker-end="url(#head)"/>
+        <rect class="box" x="262" y="176" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="268" y="190" width="20" height="20"/>
+        <text class="title" x="294" y="197">B2 · live ratio, avg odds</text>
+        <text class="sub" x="294" y="214">HOP 15 min · live_bet_ratio</text>
+        <line class="edge" x1="562" y1="200" x2="618" y2="200" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="jobB3">
+        <polyline class="edge" points="193,274 236,274 236,260 260,260" marker-end="url(#head)"/>
+        <rect class="box" x="262" y="236" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="268" y="250" width="20" height="20"/>
+        <text class="title" x="294" y="257">B3 · stake, sport variety</text>
+        <text class="sub" x="294" y="274">HOP 30 min · total_stake</text>
+        <line class="edge" x1="562" y1="260" x2="618" y2="260" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="jobC1">
+        <polyline class="edge" points="193,370 236,370 236,320 260,320" marker-end="url(#head)"/>
+        <rect class="box" x="262" y="296" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="268" y="310" width="20" height="20"/>
+        <text class="title" x="294" y="317">C1 · net P&amp;L</text>
+        <text class="sub" x="294" y="334">HOP 30 min · net_pnl_30min</text>
+        <line class="edge" x1="562" y1="320" x2="618" y2="320" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="jobC2">
+        <polyline class="edge" points="193,370 236,370 236,380 260,380" marker-end="url(#head)"/>
+        <rect class="box" x="262" y="356" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="268" y="370" width="20" height="20"/>
+        <text class="title" x="294" y="377">C2 · loss streak</text>
+        <text class="sub" x="294" y="394">MATCH_RECOGNIZE (L+ W)</text>
+        <line class="edge" x1="562" y1="380" x2="618" y2="380" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="jobD">
+        <polyline class="edge" points="193,466 236,466 236,440 260,440" marker-end="url(#head)"/>
+        <rect class="box" x="262" y="416" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="268" y="430" width="20" height="20"/>
+        <text class="title" x="294" y="437">D · geo mismatches</text>
+        <text class="sub" x="294" y="454">HOP 15 min · distinct countries</text>
+        <line class="edge" x1="562" y1="440" x2="618" y2="440" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="risk_scoring">
+        <line class="edge" x1="800" y1="80" x2="858" y2="80" marker-end="url(#head)"/>
+        <rect class="box" x="860" y="56" width="240" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="866" y="70" width="20" height="20"/>
+        <text class="title" x="892" y="77">Risk scoring</text>
+        <text class="sub" x="892" y="94">bets ⋈ features · rules</text>
+        <line class="edge" x1="1080" y1="104" x2="1080" y2="148" marker-end="url(#head)"/>
+      </g>
+      <text class="edge-label" x="829" y="72" text-anchor="middle">lookup</text>
+      <g class="job" data-edge="risk_log">
+        <line class="edge" x1="1080" y1="202" x2="1080" y2="248" marker-end="url(#head)"/>
+        <rect class="box" x="860" y="250" width="240" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="866" y="264" width="20" height="20"/>
+        <text class="title" x="892" y="271">Alert log</text>
+        <text class="sub" x="892" y="288">risk_level &lt;&gt; NORMAL</text>
+        <line class="edge" x1="1080" y1="298" x2="1080" y2="342" marker-end="url(#head)"/>
+      </g>
+      <line class="edge" x1="800" y1="466" x2="858" y2="466" marker-end="url(#head)"/>
+      <text class="edge-label" x="829" y="458" text-anchor="middle">pyfluss</text>
+      <line class="edge" x1="1100" y1="370" x2="1153" y2="370" marker-end="url(#head)"/>
+      <text class="edge-label" x="1126" y="362" text-anchor="middle">reads</text>
+
+      <!-- Boxes (tables). data-node matches /api/pipeline/status. -->
+      <g class="node" data-node="players_cdc">
+        <rect class="box" x="23" y="56" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-postgres" x="29" y="72" width="20" height="20"/>
+        <text class="title" x="108" y="78" text-anchor="middle">players_cdc</text>
+        <text class="sub" x="108" y="96" text-anchor="middle">PostgreSQL · CDC</text>
+      </g>
+      <g class="node" data-node="player_wallets_cdc">
+        <rect class="box" x="23" y="152" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-postgres" x="29" y="168" width="20" height="20"/>
+        <text class="title" x="108" y="174" text-anchor="middle">player_wallets_cdc</text>
+        <text class="sub" x="108" y="192" text-anchor="middle">PostgreSQL · CDC</text>
+      </g>
+      <g class="node" data-node="bets">
+        <rect class="box" x="23" y="248" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-kafka" x="29" y="264" width="20" height="20"/>
+        <text class="title" x="108" y="270" text-anchor="middle">bets</text>
+        <text class="sub" x="108" y="288" text-anchor="middle">topic bets</text>
+      </g>
+      <g class="node" data-node="bet_settlements">
+        <rect class="box" x="23" y="344" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-kafka" x="29" y="360" width="20" height="20"/>
+        <text class="title" x="108" y="366" text-anchor="middle">bet_settlements</text>
+        <text class="sub" x="108" y="384" text-anchor="middle">topic bet_settlements</text>
+      </g>
+      <g class="node" data-node="login_events">
+        <rect class="box" x="23" y="440" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-kafka" x="29" y="456" width="20" height="20"/>
+        <text class="title" x="108" y="462" text-anchor="middle">login_events</text>
+        <text class="sub" x="108" y="480" text-anchor="middle">topic login_events</text>
+      </g>
+      <g class="node" data-node="feature_store">
+        <rect class="box" x="620" y="56" width="180" height="408" rx="6"/>
+        <use class="icon" href="#i-db" x="700" y="200" width="20" height="20"/>
+        <text class="title" x="710" y="244" text-anchor="middle">player_feature_store</text>
+        <text class="sub" x="710" y="262" text-anchor="middle">fluss.betting</text>
+        <text class="sub" x="710" y="286" text-anchor="middle">PK player_id</text>
+        <text class="sub" x="710" y="302" text-anchor="middle">one row per player</text>
+        <text class="sub" x="710" y="318" text-anchor="middle">7 writers, each its</text>
+        <text class="sub" x="710" y="334" text-anchor="middle">own columns</text>
+      </g>
+      <g class="node" data-node="risk_scores">
+        <rect class="box" x="860" y="150" width="240" height="52" rx="6"/>
+        <use class="icon" href="#i-kafka" x="866" y="166" width="20" height="20"/>
+        <text class="title" x="980" y="172" text-anchor="middle">risk_scores</text>
+        <text class="sub" x="980" y="190" text-anchor="middle">topic risk_scores · every bet</text>
+      </g>
+      <g class="node" data-node="risk_score_log">
+        <rect class="box" x="860" y="344" width="240" height="52" rx="6"/>
+        <use class="icon" href="#i-postgres" x="866" y="360" width="20" height="20"/>
+        <text class="title" x="980" y="366" text-anchor="middle">risk_score_log</text>
+        <text class="sub" x="980" y="384" text-anchor="middle">PostgreSQL · alerts only</text>
+      </g>
+      <g class="node" data-node="inference">
+        <rect class="box" x="860" y="440" width="240" height="52" rx="6"/>
+        <use class="icon" href="#i-api" x="866" y="456" width="20" height="20"/>
+        <text class="title" x="980" y="462" text-anchor="middle">Inference service</text>
+        <text class="sub" x="980" y="480" text-anchor="middle">POST /score · :9051</text>
+      </g>
+      <g class="node" data-node="outliner">
+        <rect class="box" x="1155" y="56" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-bolt" x="1161" y="72" width="20" height="20"/>
+        <text class="title" x="1240" y="78" text-anchor="middle">Outlier generator</text>
+        <text class="sub" x="1240" y="96" text-anchor="middle">BOT_001, GEO_001 … · :9050</text>
+      </g>
+      <g class="node" data-node="grafana">
+        <rect class="box" x="1155" y="344" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-grafana" x="1161" y="360" width="20" height="20"/>
+        <text class="title" x="1240" y="366" text-anchor="middle">Grafana</text>
+        <text class="sub" x="1240" y="384" text-anchor="middle">Risk pipeline dashboard</text>
+      </g>
+
+      <!-- The buttons, drawn by the script below from PILLS -->
+      <g id="pills"></g>
+      <rect id="guideRing" rx="13" hidden/>
+    </svg>
+
+  <!-- Floating: the suggested steps (drag it by its title, collapse it with the button) -->
+  <section id="steps" class="float" aria-labelledby="stepsTitle">
+    <div class="fhead" id="stepsHead">
+      <strong id="stepsTitle">Suggested steps</strong><span class="spacer"></span>
+      <button type="button" id="stepsToggle" aria-expanded="true" aria-controls="stepsBody" title="Collapse">–</button>
+    </div>
+    <div class="fbody" id="stepsBody">
+      <p>Every box is a table, every job box a Flink job. A box turns <b>green</b> when the job
+         feeding it runs and the table returns rows. Each button opens its SQL — edit it if you like,
+         then run it. The same steps as the README and the editor's Examples menu:</p>
+    <ol>
+        <li><b>Create</b> <code>players_cdc</code> and <code>player_wallets_cdc</code>, the CDC sources, and <b>View data</b>. <span class="lab">CDC</span></li>
+        <li><b>Create</b> the Fluss <code>player_feature_store</code>, <b>Deploy</b> Job A and look at the rows it writes. <span class="lab">03</span></li>
+        <li><b>Create</b> <code>bets</code>, then <b>Deploy</b> B1, B2 and B3: windowed bet features. <span class="lab">04</span></li>
+        <li><b>Create</b> <code>bet_settlements</code> and <code>login_events</code>, <b>Deploy</b> C1, C2 and D. <span class="lab">04</span></li>
+        <li><b>Create</b> <code>risk_scores</code>, <b>Deploy</b> Risk scoring: every bet joined with its player's features. <span class="lab">05</span></li>
+        <li><b>Create</b> <code>risk_score_log</code>, <b>Deploy</b> Alert log, fire an outlier and watch it in Grafana. <span class="lab">05</span></li>
+      </ol>
+      <div class="legend">
+        <span><i class="inactive"></i>not created yet</span>
+        <span><i></i>created</span>
+        <span><i class="starting"></i>job running, waiting for data</span>
+        <span><i class="live"></i>live: job running, table has rows</span>
+        <span><i class="run"></i>job running</span>
+        <span><i class="fail"></i>job restarting</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Floating: the guide's callout, placed next to the button of the next step -->
+  <section id="guide" class="float" aria-live="polite" aria-label="Guide: the next step" hidden></section>
+  <svg id="guideLink" aria-hidden="true" hidden><line/><circle r="3.5"/></svg>
+
+  <div id="zoomHint" class="float">Drag to pan · scroll or pinch to zoom · double-click to reset</div>
+  <div id="zoomCtl" class="float" role="group" aria-label="Zoom">
+    <button type="button" id="zoomOut" title="Zoom out (−)" aria-label="Zoom out">−</button>
+    <span id="zoomLevel" aria-live="polite">100%</span>
+    <button type="button" id="zoomIn" title="Zoom in (+)" aria-label="Zoom in">+</button>
+    <span class="sep"></span>
+    <button type="button" id="zoomFit" title="Reset view: centre the diagram at 100% (0, or double-click the background)">⟲ Reset view</button>
+  </div>
+</div>
+</div>
+
+<dialog id="act" aria-labelledby="actTitle">
+  <header>
+    <span class="chip" id="actKind"></span>
+    <h2 id="actTitle"></h2>
+    <span class="chip" id="actState"></span>
+    <span class="spacer"></span>
+    <button type="button" id="actClose" aria-label="Close">✕</button>
+  </header>
+  <div class="abody">
+    <p class="about" id="actAbout"></p>
+    <div id="actNotes"></div>
+    <div id="actSqlWrap">
+      <div class="sqlhead"><span>SQL — edit it if you like</span><span class="spacer"></span>
+        <a id="actReset" role="button" tabindex="0">Reset SQL</a></div>
+      <textarea id="actSql"></textarea>
+    </div>
+    <div class="actions" id="actActions"></div>
+    <div id="actResults"></div>
+  </div>
+</dialog>
+<div id="gtip" role="tooltip" hidden></div>
+
+<!-- Asked when the URL has no ?mode= : guided or on your own. -->
+<dialog id="welcome" aria-labelledby="welcomeTitle">
+  <div class="wbody">
+    <h2 id="welcomeTitle">Welcome to the Pipeline Builder</h2>
+    <p>Build the real-time feature store by clicking through the diagram: every box is a table, every
+       job box a Flink job, and every button opens the SQL it runs. How would you like to start?</p>
+    <div class="choices">
+      <button type="button" class="choice rec" data-w="on" autofocus>
+        <b><svg class="wicon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/></svg>Guide me</b>
+        <span>Step by step: the next button to press is highlighted, with what it does and what to look for. Hover anything for an explanation.</span>
+      </button>
+      <button type="button" class="choice" data-w="off">
+        <b><svg class="wicon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6l6-3 6 3 6-3v15l-6 3-6-3-6 3z"/><path d="M9 3v15M15 6v15"/></svg>Explore on my own</b>
+        <span>The diagram and the Suggested steps panel, no guide. Follow the README at your own pace.</span>
+      </button>
+    </div>
+    <p class="later">You can switch any time with the <b>Guide</b> button in the header.</p>
+  </div>
+</dialog>
+
+<script>
+const MAX_ROWS = 200;
+const host = location.hostname;
+// ── The "Components" menu: every component of the environment, with its icon ────
+// Links are built from the host this page was opened on, like the homepage's, so they
+// work on localhost and on a remote VM alike. Icons: the diagram's own marks (#i-…), plus
+// three plain glyphs for the components that have none.
+const GLYPH = {
+  home: '<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>',
+  code: '<path d="M8 8l-4 4 4 4"/><path d="M16 8l4 4-4 4"/><path d="M14 5l-4 14"/>',
+  db: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>',
+};
+const WORKSHOP = [
+  ["Environment home", "Every tool, its status, the connection details", 80, "/", { glyph: "home" }],
+  ["Flink SQL editor", "Write and run Flink SQL; the Catalog browser", 8084, "/", { glyph: "code" }],
+  ["Flink Web UI", "Running jobs, checkpoints, exceptions", 8081, "/", { mark: "flink" }],
+  ["Redpanda Console", "The topics bets, bet_settlements, login_events, risk_scores", 8082, "/topics", { mark: "kafka" }],
+  ["Grafana", "The real-time risk pipeline dashboard", 3000, "/dashboards", { mark: "grafana" }],
+  ["Inference service", "POST /score: features from Fluss, read with pyfluss", 9051, "/", { glyph: "code" }],
+  ["Outlier generator", "Fire a bot, geo-hopper or loss-streak player", 9050, "/", { glyph: "db" }],
+];
+$("wmenu").innerHTML = WORKSHOP.map(([name, desc, port, path, icon]) =>
+  `<a role="menuitem" target="_blank" rel="noopener" href="${location.protocol}//${host}:${port}${path}">` +
+  (icon.mark ? `<svg class="wicon mark" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-${icon.mark}"/></svg>`
+             : `<svg class="wicon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${GLYPH[icon.glyph]}</svg>`) +
+  `<span><b>${name}</b><small>${desc}</small></span><span class="port">:${port}</span></a>`).join("");
+function wmenuOpen(open) {
+  $("wmenu").hidden = !open;
+  $("wmenuBtn").setAttribute("aria-expanded", open);
+  if (open) $("wmenu").querySelector("a").focus();
+}
+$("wmenuBtn").onclick = e => { e.stopPropagation(); wmenuOpen($("wmenu").hidden); };
+document.addEventListener("click", e => { if (!e.target.closest(".wmenu")) wmenuOpen(false); });
+$("wmenu").addEventListener("click", () => wmenuOpen(false));
+$("wmenu").addEventListener("keydown", e => {
+  const items = [...$("wmenu").querySelectorAll("a")], i = items.indexOf(document.activeElement);
+  if (e.key === "ArrowDown") { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+  else if (e.key === "Escape") { wmenuOpen(false); $("wmenuBtn").focus(); }
+});
+let session = null, sql = null, status = null;
+// The guide's state (see "The guide" below), declared up front: restoring the panels' saved
+// layout re-fits the diagram, which re-places the guide's callout, before that code runs.
+// The experience comes from the URL: ?mode=guided or ?mode=explore. Without it, the
+// welcome pop-up asks, and the answer is written back into the URL.
+const MODE = new URLSearchParams(location.search).get("mode");
+let guideOn = MODE === "guided", guideStep = null;
+
+// ── Diagram buttons ──────────────────────────────────────────────────────────
+// [x, y, width, label, action, target]. Actions: view / create (a box), deploy (a job),
+// open (a link to another UI).
+const PILLS = [
+  [171, 224, 22, "", "open", "topic_bets"], [171, 320, 22, "", "open", "topic_bet_settlements"],
+  [171, 416, 22, "", "open", "topic_login_events"], [1012, 208, 22, "", "open", "topic_risk_scores"],   // icon buttons
+  [23, 114, 70, "Create", "create", "players_cdc"],         [99, 114, 70, "View data", "view", "players_cdc"],
+  [23, 210, 70, "Create", "create", "player_wallets_cdc"],  [99, 210, 70, "View data", "view", "player_wallets_cdc"],
+  [23, 306, 70, "Create", "create", "bets"],                [99, 306, 70, "View data", "view", "bets"],
+  [23, 402, 70, "Create", "create", "bet_settlements"],     [99, 402, 70, "View data", "view", "bet_settlements"],
+  [23, 498, 70, "Create", "create", "login_events"],        [99, 498, 70, "View data", "view", "login_events"],
+  ...["jobA", "jobB1", "jobB2", "jobB3", "jobC1", "jobC2", "jobD"].map((e, i) => [490, 70 + 60 * i, 66, "Deploy", "deploy", e]),
+  [628, 474, 78, "Create", "create", "feature_store"],      [714, 474, 78, "View data", "view", "feature_store"],
+  [1028, 70, 66, "Deploy", "deploy", "risk_scoring"],
+  [860, 208, 70, "Create", "create", "risk_scores"],        [936, 208, 70, "View data", "view", "risk_scores"],
+  [1028, 264, 66, "Deploy", "deploy", "risk_log"],
+  [860, 402, 70, "Create", "create", "risk_score_log"],     [936, 402, 70, "View data", "view", "risk_score_log"],
+  [860, 498, 90, "Open", "open", "inference"],
+  [1195, 114, 90, "Open", "open", "outliner"],
+  [1195, 402, 90, "Open", "open", "grafana"],
+];
+const LINKS = { grafana: [3000, "/d/betting-features-v1"], inference: [9051, "/"], outliner: [9050, "/"],
+                // the sources themselves: the Kafka topics in Redpanda Console
+                topic_bets: [8082, "/topics/bets"], topic_bet_settlements: [8082, "/topics/bet_settlements"],
+                topic_login_events: [8082, "/topics/login_events"], topic_risk_scores: [8082, "/topics/risk_scores"] };
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function drawPills() {
+  const g = $("pills");
+  for (const [x, y, w, label, action, target] of PILLS) {
+    const p = document.createElementNS(SVGNS, "g");
+    p.setAttribute("class", "pill"); p.setAttribute("role", "button"); p.setAttribute("tabindex", "0");
+    p.dataset.action = action; p.dataset.target = target;
+    p.innerHTML = `<rect x="${x}" y="${y}" width="${w}" height="20" rx="10"/><text x="${x + w / 2}" y="${y + 14}" text-anchor="middle"></text>`;
+    p.querySelector("text").textContent = label;
+    const where = Object.fromEntries(Object.keys(LINKS).filter(k => k.startsWith("topic_"))
+      .map(k => [k, `the ${k.slice(6)} topic in Redpanda Console`]));
+    if (where[target]) {   // View source: a round icon button, a magnifying glass, with a tooltip
+      p.querySelector("text").remove();
+      p.insertAdjacentHTML("beforeend", `<circle class="glyph" cx="${x + 10}" cy="${y + 9}" r="4.2"/><path class="glyph" d="M${x + 13.1} ${y + 12.1} L${x + 16} ${y + 15}"/>`);
+      const t = document.createElementNS(SVGNS, "title"); t.textContent = "View source"; p.prepend(t);
+      p.setAttribute("aria-label", "View source: " + where[target]); p.classList.add("src");
+    }
+    const go = () => { if (!p.classList.contains("off") || action === "view" || action === "deploy") onPill(action, target); };
+    p.addEventListener("click", go);
+    p.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+    g.append(p);
+  }
+}
+const pill = (action, target) => document.querySelector(`.pill[data-action="${action}"][data-target="${target}"]`);
+function setPill(p, label, cls, aria) {
+  if (!p) return;
+  p.setAttribute("class", "pill" + (cls ? " " + cls : ""));
+  p.querySelector("text").textContent = label;
+  p.setAttribute("aria-label", aria || label);
+  p.setAttribute("aria-disabled", cls === "off");
+}
+
+// ── Status → diagram ─────────────────────────────────────────────────────────
+const STATE_LABEL = { inactive: "not created", ready: "created", starting: "starting", live: "live",
+                      idle: "not deployed", running: "running", failing: "restarting" };
+const NODE_KIND = { players_cdc: "CDC SOURCE", player_wallets_cdc: "CDC SOURCE", bets: "KAFKA SOURCE",
+                    bet_settlements: "KAFKA SOURCE", login_events: "KAFKA SOURCE", feature_store: "FLUSS PK TABLE",
+                    risk_scores: "KAFKA SINK", risk_score_log: "JDBC SINK" };
+const TABLES = Object.keys(NODE_KIND);
+const JOBS = ["jobA", "jobB1", "jobB2", "jobB3", "jobC1", "jobC2", "jobD", "risk_scoring", "risk_log"];
+
+function paint() {
+  if (!status) return;
+  for (const g of document.querySelectorAll(".node[data-node]")) {
+    const st = status.nodes[g.dataset.node]?.state;
+    if (st) g.dataset.state = st; else g.removeAttribute("data-state");
+  }
+  // A reader takes its table's state: live once the table it reads has rows.
+  for (const [g, n] of [["grafana", "risk_score_log"], ["inference", "feature_store"]])
+    document.querySelector(`.node[data-node="${g}"]`).dataset.state = status.nodes[n].state === "live" ? "live" : "ready";
+  for (const g of document.querySelectorAll(".job[data-edge]")) {
+    const s = status.edges[g.dataset.edge], st = s?.state || "idle";
+    g.dataset.state = st;
+    g.dataset.ready = !!s?.ready || st !== "idle";
+    const head = st === "running" ? "head-ok" : st === "failing" ? "head-err" : "head";
+    g.querySelectorAll("[marker-end]").forEach(el => el.setAttribute("marker-end", `url(#${head})`));
+  }
+  for (const n of TABLES) {
+    const exists = status.nodes[n].exists;
+    setPill(pill("create", n), exists ? "✓ Created" : "Create", exists ? "off" : "primary",
+            exists ? `${NODE_NAME[n]} is created` : `Create ${NODE_NAME[n]}`);
+    setPill(pill("view", n), "View data", exists ? "" : "off", `View the data of ${NODE_NAME[n]}`);
+  }
+  for (const e of JOBS) {
+    const s = status.edges[e];
+    const n = s.jobs.length;
+    if (s.state === "running") setPill(pill("deploy", e), n > 1 ? `● ×${n}` : "● Running", "running", `${NODE_NAME[e]} is running`);
+    else if (s.state === "failing") setPill(pill("deploy", e), "! Restart", "failing");
+    else if (s.state === "starting") setPill(pill("deploy", e), "… Starting", "running");
+    else setPill(pill("deploy", e), "Deploy", s.ready ? "primary" : "off", s.ready ? `Deploy ${NODE_NAME[e]}` : `Deploy ${NODE_NAME[e]} (create its tables first)`);
+  }
+  if ($("act").open) refreshDialog();
+  guideUpdate();
+}
+
+let polling = false, bootstrapping = false, bootstrapError = null, bootstrapRetry = 0;
+const BOOTSTRAP_RETRY = 30000;
+async function poll() {
+  if (polling || !session) return;
+  polling = true;
+  try {
+    status = await api(`/api/pipeline/status/${session}`);
+    // The fluss catalog is missing, or a running pipeline's tables (a full ./start.sh
+    // created them only in its own SQL Client sessions).
+    // A failure is the stack's, not the session's (e.g. a missing connector JAR): it stays
+    // on screen and is retried every BOOTSTRAP_RETRY, not on every poll.
+    if (status.bootstrap && !bootstrapping && Date.now() >= bootstrapRetry) {
+      bootstrapping = true;
+      setStatus("registering the pipeline's tables in this session…");
+      try {
+        const b = await api(`/api/pipeline/bootstrap/${session}`, {});
+        bootstrapError = null;
+        status = await api(`/api/pipeline/status/${session}`);
+        if (b.sources?.length) catalogReload();
+      } catch (e) {
+        bootstrapError = rootCause(e.message);
+        bootstrapRetry = Date.now() + BOOTSTRAP_RETRY;
+      } finally { bootstrapping = false; }
+    }
+    if (bootstrapError && status.bootstrap) setStatus("could not register the pipeline's tables: " + bootstrapError, true);
+    else setStatus(`session ${session.slice(0, 8)} · shared with the SQL editor`);
+    paint();
+  } catch (e) {
+    if (/session|410|not found/i.test(e.message.split("\n")[0])) { session = null; store.set("session", null); await ensureSession(); catalogReload(); }
+    else setStatus("status unavailable: " + rootCause(e.message), true);
+  } finally { polling = false; }
+}
+// The gateway's errors are whole Java stack traces: the last "Caused by:" says what went
+// wrong, and the lines after it (up to the next "at ...") often say why.
+function rootCause(msg) {
+  const lines = msg.split("\n").map(l => l.trim());
+  const i = lines.map(l => l.startsWith("Caused by:")).lastIndexOf(true);
+  if (i < 0) return lines.find(l => l && !l.startsWith("<Exception")) || msg;
+  const out = [lines[i].replace(/^Caused by:\s*(\S+\.)?(\w+:\s*)?/, "")];
+  for (const l of lines.slice(i + 1)) {
+    if (l.startsWith("at ") || l.startsWith("...") || l.startsWith("End of exception")) break;
+    if (l) out.push(l);
+  }
+  return out.join(" ");
+}
+function setStatus(t, bad) { const s = $("status"); s.textContent = t; s.title = t; s.className = bad ? "bad" : ""; }
+
+// The editor's session if it is still alive, else a new one — stored under the same key,
+// so the editor picks it up too.
+async function ensureSession() {
+  const saved = store.get("session");
+  if (saved) {
+    try { await api(`/api/heartbeat/${saved}`, {}); session = saved; return; } catch { store.set("session", null); }
+  }
+  setStatus("opening a session…");
+  session = (await api("/api/session", { ddl: false })).session;
+  store.set("session", session);
+}
+
+// ── The pop-up ───────────────────────────────────────────────────────────────
+const ABOUT = {
+  players_cdc: "Every player in PostgreSQL (database betting, table players), read through change data capture: a snapshot first, then every insert, update and delete within a second. Its replication slot flink_cdc_players_slot is pre-created by pg_cdc_setup.sql. It lives in the session's in-memory catalog: a new session needs it created again.",
+  player_wallets_cdc: "Every player's wallet in PostgreSQL (player_wallets), through CDC like players_cdc: balance, lifetime deposits and withdrawals. The baseline generator updates balances as settlements pay out, so this stream never goes quiet.",
+  bets: "Every bet the generators publish to the Kafka topic bets: player, stake, bet type, sport and odds, with event_ts as event time and a 2 s watermark. It starts at the latest offset, and proc_time is what the risk-scoring lookup join reads the feature store at.",
+  bet_settlements: "Every settled bet on the topic bet_settlements: win, loss or void, stake and payout. Read from the earliest offset, so the net P&L and loss-streak jobs see the whole history.",
+  login_events: "Every login on the topic login_events, with the country it came from. Logins are rare, which is why 01 sets table.exec.source.idle-timeout: one quiet partition would otherwise hold back every window.",
+  feature_store: "fluss.betting.player_feature_store: a Fluss primary-key table, one row per player, the online feature store. Seven Flink jobs write it, each only its own columns: Fluss merges partial-column upserts into the row. It lives in Fluss itself, so unlike the source tables it survives a new session — Create is CREATE TABLE IF NOT EXISTS.",
+  risk_scores: "The Kafka topic risk_scores: one row per bet, with its risk level, the rules it tripped and how long enrichment took. Registering it creates nothing in Kafka — the topic is created by redpanda-init.",
+  risk_score_log: "PostgreSQL's public.risk_score_log, through a JDBC table keyed by bet_id, so replays overwrite rather than duplicate. Only alerts (everything but NORMAL) land here; it is what Grafana charts.",
+  jobA: "Job A, jobA-cdc-dimensions: joins players_cdc with player_wallets_cdc and writes kyc_tier, balance and lifetime_deposits for every player — plus zeroes for the windowed features, so every player has a full row before any bet. Start it first: it snapshots PostgreSQL before any row reaches Fluss.",
+  jobB1: "Job B1, jobB1-bet-velocity: bets per player in a 10-minute HOP window sliding every 10 s. A 20-minute wide window LEFT JOINed with it resets the feature to 0 when a player goes quiet. Above 8 = likely bot.",
+  jobB2: "Job B2, jobB2-live-ratio-avg-odds: share of live bets and average odds over 15 minutes. A live ratio above 0.5 is impulsive betting; low average odds with high velocity is a sharp bettor.",
+  jobB3: "Job B3, jobB3-stake-sport-variety: total stake and distinct sports over 30 minutes. Above 500 trips the stake limit; four or more sports looks like chasing losses.",
+  jobC1: "Job C1, jobC1-net-pnl: the operator's net P&L per player over 30 minutes, from bet_settlements: stakes minus payouts.",
+  jobC2: "Job C2, jobC2-loss-streak: MATCH_RECOGNIZE over each player's settlements, pattern L+ W. The streak is written when it ends — 6 or more losses is a responsible-gambling alert.",
+  jobD: "Job D, jobD-geo-mismatches: distinct login countries per player over 15 minutes. More than one means the same account logged in from two countries.",
+  risk_scoring: "risk-scoring-kafka: every bet, LEFT JOINed with its player's row in the feature store FOR SYSTEM_TIME AS OF its processing time — a lookup into Fluss, not a state copy — then scored by rules: FRAUD_HIGH, RG_ALERT, SHARP_BETTOR, STAKE_LIMIT or NORMAL, with the rule codes that fired.",
+  risk_log: "risk-score-log-postgres: reads the risk_scores topic back, drops NORMAL and upserts the alerts into PostgreSQL. A separate job, so the audit table can be replayed without re-scoring anything.",
+};
+const EDGE_FROM = { jobA: ["players_cdc", "player_wallets_cdc"], jobB1: ["bets"], jobB2: ["bets"], jobB3: ["bets"],
+                    jobC1: ["bet_settlements"], jobC2: ["bet_settlements"], jobD: ["login_events"],
+                    risk_scoring: ["bets", "feature_store"], risk_log: ["risk_scores"] };
+const EDGE_TO = { risk_scoring: "risk_scores", risk_log: "risk_score_log" };
+const edgeTo = e => EDGE_TO[e] || "feature_store";
+
+let dlg = null;   // { action, target, defaultSql }
+const editor = CodeMirror.fromTextArea($("actSql"), {
+  mode: "text/x-flinksql", lineNumbers: true, indentUnit: 2, viewportMargin: Infinity,
+  extraKeys: { "Cmd-Enter": () => primary(), "Ctrl-Enter": () => primary() },
+});
+
+// Which ABOUT text explains a button: the box's own.
+const aboutKey = (action, target) => target;
+
+function onPill(action, target) {
+  guideSeen(action, target);
+  if (action === "open") { const [port, path] = LINKS[target]; window.open(`${location.protocol}//${host}:${port}${path}`, "_blank"); return; }
+  openDialog(action, target);
+}
+
+function defaultSql(action, target) {
+  if (!sql) return "";
+  if (action === "view") return sql.nodes[target]?.view || "";
+  if (action === "create") return sql.nodes[target]?.create || "";
+  if (action === "deploy") return sql.edges[target]?.sql || "";
+  return "";
+}
+
+function openDialog(action, target) {
+  stopRuns();
+  dlg = { action, target, defaultSql: defaultSql(action, target) };
+  $("actResults").replaceChildren();
+  editor.setValue(dlg.defaultSql);
+  $("actTitle").textContent = (action === "view" ? "View data · "
+    : action === "create" ? "Create · " : action === "deploy" ? "Deploy · " : "") + NODE_NAME[target];
+  $("actKind").textContent = action === "deploy" ? "FLINK JOB" : NODE_KIND[target] || "";
+  $("actAbout").textContent = ABOUT[aboutKey(action, target)] || "";
+  refreshDialog();
+  if (!$("act").open) $("act").showModal();
+  setTimeout(() => editor.refresh(), 0);
+}
+
+// Buttons and notes follow the live status, so the pop-up reacts as the diagram does.
+function refreshDialog() {
+  if (!dlg || !status) return;
+  const { action, target } = dlg, notes = [], buttons = [];
+  const node = status.nodes[target], edge = status.edges[target];
+  let st = action === "deploy" ? edge?.state : node?.state;
+  $("actState").textContent = STATE_LABEL[st] || ""; $("actState").className = "chip " + (st === "running" ? "live" : st || "");
+  const jobLink = j => `<a target="_blank" href="${location.protocol}//${host}:8081/#/job/running/${j.jid}/overview">${esc(j.name)} · ${j.jid.slice(0, 8)}</a>`;
+  const named = ns => ns.map(n => NODE_NAME[n]).join(" and ");
+  if (action === "view") {
+    const missing = [target].filter(n => !status.nodes[n].exists);
+    buttons.push(btn("▶ Run", "primary", () => runSql(editor.getValue()), missing.length > 0));
+    if (missing.length) notes.push([`Create ${named(missing)} first.`, ""]);
+    if (target === "player_wallets_cdc" && !missing.length)
+      notes.push(["Leave it running and change a balance from a terminal — the row updates within a second:<br><code>docker compose exec postgres psql -U root -d betting -c \"UPDATE player_wallets SET balance = balance + 100 WHERE player_id = 'BOT_001';\"</code>", "", true]);
+    if (target === "feature_store" && !missing.length)
+      notes.push(["Fire an outlier from the <a target=\"_blank\" href=\"" + `${location.protocol}//${host}:9050/` + "\">outlier generator</a>, then swap <code>LIMIT 200</code> for <code>WHERE player_id = 'BOT_001'</code> and run it: its bets_last_10min climbs past 8 within seconds.", "", true]);
+  } else if (action === "create") {
+    buttons.push(btn(node?.exists ? "✓ Already created" : "Create table", "primary",
+                     () => runSql(editor.getValue()), node?.exists));
+    if (node?.exists) notes.push([target === "feature_store"
+      ? "It exists in Fluss. The CREATE is IF NOT EXISTS, so running it again changes nothing."
+      : "It exists in this session. Running the CREATE again fails as a duplicate: DROP it first to change it.", "ok"]);
+  } else if (action === "deploy") {
+    const to = edgeTo(target), missing = [...EDGE_FROM[target], to].filter(n => !status.nodes[n].exists);
+    if (edge.jobs.length) {
+      notes.push([`Running: ${edge.jobs.map(jobLink).join(", ")}.` + (edge.jobs.length > 1 ? " <b>More than one copy is running</b>, so every row is written more than once: stop the extra ones." : ""), edge.jobs.length > 1 ? "err" : "ok", true]);
+      for (const j of edge.jobs) buttons.push(btn(`■ Stop ${j.jid.slice(0, 8)}`, "danger", () => stopJob(j.jid)));
+      buttons.push(btn(`View ${NODE_NAME[to]}`, "", () => openDialog("view", to)));
+    } else {
+      if (missing.length) notes.push([`Create ${named(missing)} first.`, "err"]);
+      if (target === "jobA") notes.push(["It snapshots both PostgreSQL tables before the first row reaches Fluss, so give it a few seconds.", ""]);
+      if (to === "feature_store" && target !== "jobA" && status.edges.jobA.state === "idle")
+        notes.push(["Job A is not running: rows this job writes will have no kyc_tier or balance until it is.", ""]);
+      buttons.push(btn("▶ Deploy job", "primary", () => runSql(editor.getValue()), missing.length > 0));
+    }
+  }
+  $("actNotes").replaceChildren(...notes.map(([t, cls, html]) => {
+    const p = document.createElement("p"); p.className = "note " + cls;
+    if (html) p.innerHTML = t; else p.textContent = t;
+    return p;
+  }));
+  const hint = document.createElement("span"); hint.className = "hint";
+  hint.textContent = "⌘/Ctrl+Enter runs it";
+  const spacer = document.createElement("span"); spacer.className = "spacer";
+  const running = runs.size > 0;
+  if (running) buttons.unshift(btn("Cancel", "danger", stopRuns));
+  $("actActions").replaceChildren(...buttons, spacer, hint);
+}
+function btn(label, cls, fn, disabled) {
+  const b = document.createElement("button"); b.type = "button"; b.textContent = label;
+  if (cls) b.className = cls; b.disabled = !!disabled || (runs.size > 0 && cls === "primary");
+  b.onclick = fn; return b;
+}
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function primary() { const b = $("actActions").querySelector("button.primary:not(:disabled)"); if (b) b.click(); }
+
+$("actClose").onclick = () => $("act").close();
+$("act").addEventListener("click", e => { if (e.target === $("act")) $("act").close(); });
+$("act").addEventListener("close", () => { stopRuns(); dlg = null; });
+$("actReset").onclick = () => dlg && editor.setValue(dlg.defaultSql);
+$("actReset").onkeydown = e => { if (e.key === "Enter") $("actReset").click(); };
+
+async function stopJob(jid) {
+  try { await api(`/api/jobs/${jid}/cancel`, {}); } catch (e) { alert(e.message); }
+  setTimeout(poll, 800);
+}
+
+// ── Running the pop-up's SQL ─────────────────────────────────────────────────
+// Same calls as the editor: split, then each statement through /api/run and /api/result.
+// Closing the pop-up cancels what is still running, and RESETs any session option a SET
+// in it changed, so an aborted script cannot leave the shared session in batch mode or
+// with a job name stuck.
+const runs = new Set();      // operation handles still being read
+let runToken = 0, setKeys = new Set();
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function stopRuns() {
+  runToken++;
+  for (const op of runs) api(`/api/cancel/${session}/${op}`, {}).catch(() => {});
+  runs.clear();
+  for (const k of setKeys) api(`/api/run/${session}`, { sql: `RESET '${k}'` }).catch(() => {});
+  setKeys = new Set();
+  if (dlg) refreshDialog();
+}
+
+async function runSql(text) {
+  stopRuns();
+  const token = runToken;
+  $("actResults").replaceChildren();
+  const { statements } = await api("/api/split", { sql: text });
+  // The catalog browser refreshes only what the script's DDL changed (catalog.js); an
+  // unqualified name needs the session's current catalog, taken before the script runs.
+  const before = !$("catalog").hidden && needsCurrent(statements)
+    ? await api(`/api/catalog/${session}/current`).catch(() => null) : null;
+  const succeeded = [];
+  for (const stmt of statements) {
+    if (token !== runToken) break;
+    const set = stmt.match(/^\s*SET\s+'([^']+)'/i), reset = stmt.match(/^\s*RESET\s+'([^']+)'/i);
+    if (!(await runOne(stmt, token))) break;
+    succeeded.push(stmt);
+    if (set) setKeys.add(set[1]); if (reset) setKeys.delete(reset[1]);
+  }
+  catalogAfterDdl(succeeded, before);
+  if (succeeded.length < statements.length) { refreshDialog(); return; }
+  setKeys = new Set();
+  refreshDialog();
+  setTimeout(poll, 300);   // the diagram catches up with what was just created or deployed
+}
+
+async function runOne(stmt, token) {
+  const el = document.createElement("div"); el.className = "res";
+  el.innerHTML = `<div class="rhead"><span class="rstmt"></span><span class="rstate">running…</span></div><div class="rbody"></div>`;
+  CodeMirror.runMode(stmt.replace(/\s+/g, " "), "text/x-flinksql", el.querySelector(".rstmt"));
+  $("actResults").append(el);
+  const state = el.querySelector(".rstate"), body = el.querySelector(".rbody");
+  const wait = document.createElement("div"); wait.className = "waiting";
+  wait.innerHTML = `<span class="spinner" aria-hidden="true"></span><div><span class="msg">Running…</span><span class="elapsed"></span><div class="hint"></div></div>`;
+  body.append(wait);
+  const t0 = Date.now(), tick = setInterval(() => {
+    const secs = Math.floor((Date.now() - t0) / 1000);
+    wait.querySelector(".elapsed").textContent = ` ${secs}s`;
+    if (secs >= 10 && jobLinked) wait.querySelector(".hint").textContent =
+      "A streaming read waits for new events, and a CDC read snapshots PostgreSQL first, so the first rows can take a while. Closing the pop-up cancels it.";
+  }, 1000);
+  let jobLinked = false;
+  const fail = msg => {
+    const cause = msg.split("\n").filter(l => l.startsWith("Caused by:")).pop();
+    body.innerHTML = `<div class="err"></div>`;
+    body.firstChild.textContent = (cause || msg.split("\n")[0]).replace(/^Caused by:\s*(\w+\.)*/, "");
+    el.classList.add("fail"); state.textContent = "failed";
+  };
+  let op;
+  try { op = (await api(`/api/run/${session}`, { sql: stmt })).op; }
+  catch (e) { clearInterval(tick); fail(e.message); return false; }
+  runs.add(op); refreshDialog();
+  let tokenN = 0, columns = [], rows = [];
+  try {
+    while (tokenN !== null) {
+      if (token !== runToken) { state.textContent = `cancelled · ${rows.length} rows`; el.classList.add("fail"); return false; }
+      const r = await api(`/api/result/${session}/${op}/${tokenN}`);
+      if (r.jobId && !jobLinked) {
+        jobLinked = true;
+        wait.querySelector(".msg").textContent = "Flink job running — waiting for rows…";
+        state.insertAdjacentHTML("afterbegin", `<a target="_blank" href="${location.protocol}//${host}:8081/#/job/running/${r.jobId}/overview">Flink job ${r.jobId.slice(0, 8)}</a>`);
+      }
+      if (r.type === "PAYLOAD") {
+        if (r.columns.length) columns = r.columns;
+        for (const x of r.rows) {
+          if (x.kind === "UPDATE_BEFORE" || x.kind === "DELETE") {
+            const k = JSON.stringify(x.fields), i = rows.findIndex(y => JSON.stringify(y) === k);
+            if (i >= 0) rows.splice(i, 1);
+          } else rows.push(x.fields);
+        }
+        if (rows.length > MAX_ROWS) rows.splice(0, rows.length - MAX_ROWS);
+        // An empty page changes nothing: skip it, so a scrollbar drag is not interrupted.
+        if (rows.length && r.rows.length) render(body, columns, rows);
+        state.lastChild.textContent = `running · ${rows.length} rows`;
+      }
+      if (r.type === "EOS" || r.next === null) break;
+      tokenN = r.next;
+      await sleep(r.type === "PAYLOAD" && r.rows.length ? 150 : 500);
+    }
+  } catch (e) { clearInterval(tick); runs.delete(op); fail(e.message); return false; }
+  clearInterval(tick); runs.delete(op);
+  el.classList.add("done");
+  state.lastChild.textContent = `done · ${rows.length} rows`;
+  if (rows.length) render(body, columns, rows); else body.innerHTML = `<div class="empty">${columns.length ? "no rows" : "OK"}</div>`;
+  return true;
+}
+
+// In the query's own order. A live stream appends at the bottom, so the grid follows it
+// down — unless the reader has scrolled up to look at something, or is holding the
+// scrollbar. The grid is the scroll container, so it is kept across renders and only its
+// table is swapped: a new element would drop the drag and reset both scroll positions.
+function render(body, columns, rows) {
+  let grid = body.querySelector(".grid");
+  const fresh = !grid;
+  const follow = fresh || (!grid.held && grid.scrollTop + grid.clientHeight >= grid.scrollHeight - 8);
+  const t = document.createElement("table");
+  const hr = t.createTHead().insertRow();
+  for (const c of columns) { const th = document.createElement("th"); th.textContent = c; hr.append(th); }
+  const tb = t.createTBody();
+  for (const row of rows) {
+    const tr = tb.insertRow();
+    for (const v of row) {
+      const td = tr.insertCell();
+      if (v === null) { td.textContent = "NULL"; td.className = "null"; }
+      else td.textContent = typeof v === "object" ? JSON.stringify(v) : String(v);
+    }
+  }
+  if (fresh) {
+    grid = document.createElement("div"); grid.className = "grid";
+    grid.addEventListener("pointerdown", () => { grid.held = true; });
+    body.replaceChildren(grid);
+  }
+  const { scrollTop, scrollLeft } = grid;
+  grid.replaceChildren(t);
+  grid.scrollLeft = scrollLeft;
+  grid.scrollTop = follow ? grid.scrollHeight : scrollTop;
+}
+// Released anywhere, even outside the grid where a scrollbar drag often ends.
+document.addEventListener("pointerup", () => { for (const g of document.querySelectorAll(".res .grid")) g.held = false; }, true);
+
+// ── Pan and zoom ─────────────────────────────────────────────────────────────
+// The view is a centre point in diagram units and a zoom factor relative to "fit"; the
+// SVG's viewBox is derived from it and the stage's size, so a resize keeps the zoom.
+const stage = $("stage"), svg = $("diagram");
+const CONTENT = { x: 0, y: 0, w: 1350, h: 540 }, MARGIN = 24, ZMIN = 0.5, ZMAX = 4;
+let view = { cx: CONTENT.w / 2, cy: CONTENT.h / 2, z: 1 };
+let atFit = true;   // still showing the fitted view: re-fit on resize or when the panel changes
+// Where "fit" puts the diagram: the stage, minus the steps panel's column while the panel
+// is expanded in its default spot (bottom-left) and the stage is wide enough to spare it.
+function fitArea() {
+  const r = stage.getBoundingClientRect(), panel = $("steps");
+  const docked = !panel.classList.contains("collapsed") && !(stepsPos && stepsPos.x != null);
+  const gutter = docked && r.width > 900 ? panel.offsetWidth + 16 : 0;
+  return { left: gutter, width: r.width - gutter, height: r.height, stageW: r.width };
+}
+const fitScale = () => {
+  const a = fitArea();
+  return Math.max(0.05, Math.min((a.width - 2 * MARGIN) / CONTENT.w, (a.height - 2 * MARGIN) / CONTENT.h));
+};
+function applyView() {
+  const r = stage.getBoundingClientRect(), scale = view.z * fitScale();
+  const w = r.width / scale, h = r.height / scale;
+  svg.setAttribute("viewBox", `${view.cx - w / 2} ${view.cy - h / 2} ${w} ${h}`);
+  $("zoomLevel").textContent = Math.round(view.z * 100) + "%";
+  guidePlace();
+}
+function fit() {
+  // Centre the content in the fit area, which may sit right of the stage's own centre.
+  const a = fitArea(), scale = fitScale();
+  const shift = (a.left + a.width / 2 - a.stageW / 2) / scale;
+  view = { cx: CONTENT.x + CONTENT.w / 2 - shift, cy: CONTENT.y + CONTENT.h / 2, z: 1 };
+  atFit = true;
+  applyView();
+}
+// Zoom keeping the diagram point under (clientX, clientY) where it is; the centre by default.
+function zoomAt(factor, clientX, clientY) {
+  const r = stage.getBoundingClientRect(), f = fitScale();
+  const z = Math.min(Math.max(view.z * factor, ZMIN), ZMAX);
+  const dx = (clientX ?? r.left + r.width / 2) - (r.left + r.width / 2);
+  const dy = (clientY ?? r.top + r.height / 2) - (r.top + r.height / 2);
+  const ux = view.cx + dx / (view.z * f), uy = view.cy + dy / (view.z * f);
+  view = { z, cx: ux - dx / (z * f), cy: uy - dy / (z * f) };
+  atFit = false;
+  applyView();
+}
+function panBy(dx, dy) { const scale = view.z * fitScale(); view.cx -= dx / scale; view.cy -= dy / scale; atFit = false; applyView(); }
+
+stage.addEventListener("wheel", e => {
+  if (e.target.closest(".float")) return;
+  e.preventDefault();
+  zoomAt(Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX, e.clientY);   // ctrlKey: a trackpad pinch
+}, { passive: false });
+
+// Drag pans, two fingers pinch. A drag only starts after 4px, and the click that ends it is
+// swallowed, so panning never presses a button by accident.
+const pointers = new Map();
+let drag = null, swallowClick = false;
+svg.addEventListener("pointerdown", e => {
+  if (e.pointerType === "mouse" && e.button !== 0) return;
+  swallowClick = false;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 1) drag = { x: e.clientX, y: e.clientY, moved: false };
+  else if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    drag = { pinch: Math.hypot(a.x - b.x, a.y - b.y), moved: true };
+  }
+});
+svg.addEventListener("pointermove", e => {
+  if (!drag || !pointers.has(e.pointerId)) return;
+  const prev = pointers.get(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()], d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (drag.pinch) zoomAt(d / drag.pinch, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    drag.pinch = d;
+    return;
+  }
+  if (!drag.moved) {
+    if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 4) return;
+    drag.moved = true;
+    svg.setPointerCapture(e.pointerId);
+    svg.classList.add("panning");
+  }
+  panBy(e.clientX - prev.x, e.clientY - prev.y);
+});
+const endPointer = e => {
+  pointers.delete(e.pointerId);
+  if (pointers.size) return;
+  if (drag?.moved) swallowClick = true;
+  drag = null;
+  svg.classList.remove("panning");
+};
+svg.addEventListener("pointerup", endPointer);
+svg.addEventListener("pointercancel", endPointer);
+svg.addEventListener("click", e => { if (swallowClick) { swallowClick = false; e.stopPropagation(); e.preventDefault(); } }, true);
+
+stage.addEventListener("keydown", e => {
+  if (e.target.closest(".float") || e.metaKey || e.ctrlKey) return;
+  const k = e.key, step = 60;
+  if (k === "+" || k === "=") zoomAt(1.25);
+  else if (k === "-" || k === "_") zoomAt(1 / 1.25);
+  else if (k === "0") fit();
+  else if (k === "ArrowLeft") panBy(step, 0);
+  else if (k === "ArrowRight") panBy(-step, 0);
+  else if (k === "ArrowUp") panBy(0, step);
+  else if (k === "ArrowDown") panBy(0, -step);
+  else return;
+  e.preventDefault();
+});
+$("zoomIn").onclick = () => zoomAt(1.25);
+$("zoomOut").onclick = () => zoomAt(1 / 1.25);
+$("zoomFit").onclick = fit;
+// Double-click on empty diagram (not a button or box) resets the view too.
+svg.addEventListener("dblclick", e => { if (!e.target.closest(".pill, .node")) { e.preventDefault(); fit(); } });
+new ResizeObserver(() => { placeSteps(); atFit ? fit() : applyView(); }).observe(stage);
+
+// ── The floating "Suggested steps" panel ─────────────────────────────────────
+// Dragged by its title bar inside the stage; its position and collapsed state are
+// remembered (per browser) under pipeline.steps.
+let stepsPos = null;
+try { stepsPos = JSON.parse(store.get("pipeline.steps") || "null"); } catch {}
+function placeSteps() {
+  const panel = $("steps");
+  if (!stepsPos || stepsPos.x == null) return;   // default spot: bottom-left, from the CSS
+  const sw = stage.clientWidth, sh = stage.clientHeight;
+  const x = Math.min(Math.max(stepsPos.x, 0), Math.max(0, sw - panel.offsetWidth));
+  const y = Math.min(Math.max(stepsPos.y, 0), Math.max(0, sh - panel.offsetHeight));
+  Object.assign(panel.style, { left: x + "px", top: y + "px", bottom: "auto" });
+}
+function setCollapsed(c) {
+  $("steps").classList.toggle("collapsed", c);
+  $("stepsToggle").textContent = c ? "+" : "–";
+  $("stepsToggle").title = c ? "Expand" : "Collapse";
+  $("stepsToggle").setAttribute("aria-expanded", !c);
+  stepsPos = { ...(stepsPos || {}), collapsed: c };
+  store.set("pipeline.steps", JSON.stringify(stepsPos));
+  placeSteps();
+  if (atFit) fit();   // the panel's column opened or closed: re-fit around it
+}
+$("stepsToggle").onclick = () => setCollapsed(!$("steps").classList.contains("collapsed"));
+$("stepsHead").addEventListener("pointerdown", e => {
+  if (e.target.closest("button")) return;
+  const panel = $("steps"), r = panel.getBoundingClientRect(), sr = stage.getBoundingClientRect();
+  const off = { x: e.clientX - r.left, y: e.clientY - r.top };
+  $("stepsHead").setPointerCapture(e.pointerId);
+  const move = ev => {
+    stepsPos = { ...(stepsPos || {}), x: ev.clientX - sr.left - off.x, y: ev.clientY - sr.top - off.y };
+    placeSteps();
+  };
+  const up = () => {
+    $("stepsHead").removeEventListener("pointermove", move);
+    $("stepsHead").removeEventListener("pointerup", up);
+    store.set("pipeline.steps", JSON.stringify(stepsPos));
+    if (atFit) fit();   // moved out of its default spot: the diagram can use the whole stage
+  };
+  $("stepsHead").addEventListener("pointermove", move);
+  $("stepsHead").addEventListener("pointerup", up);
+});
+$("stepsHead").addEventListener("dblclick", e => {   // back to the default spot
+  if (e.target.closest("button")) return;
+  stepsPos = { collapsed: $("steps").classList.contains("collapsed") };
+  store.set("pipeline.steps", JSON.stringify(stepsPos));
+  Object.assign($("steps").style, { left: "", top: "", bottom: "" });
+  if (atFit) fit();
+});
+$("stepsHead").title = "Drag to move · double-click to put it back";
+if (stepsPos?.collapsed) setCollapsed(true);
+
+// ── The guide ────────────────────────────────────────────────────────────────
+// For whoever runs the workshop: a callout pointing at the next step's button, with what
+// it does and what to look for after, and on hover an explanation of every box, arrow and
+// button. Steps are done when the status says so; a step that only reads (View data, Open)
+// is done once its pop-up was opened, remembered per session. On or off from the header or
+// the URL (?mode=guided | ?mode=explore).
+const GUIDE = [
+  { a: "create", t: "players_cdc", li: 0, lab: "CDC", title: "Register the players table (CDC)",
+    what: "Describes PostgreSQL's <b>players</b> table to Flink as <b>players_cdc</b>, a <b>postgres-cdc</b> source: a snapshot, then every change from the write-ahead log. Nothing is read yet — a table is only a definition.",
+    look: "The box turns green.",
+    done: s => s.nodes.players_cdc.exists },
+  { a: "create", t: "player_wallets_cdc", li: 0, lab: "CDC", title: "Register the wallets table (CDC)",
+    what: "The same for <b>player_wallets</b>: balance and lifetime deposits, the dimensions the risk rules read next to the windowed features.",
+    look: "The box turns green.",
+    done: s => s.nodes.player_wallets_cdc.exists },
+  { a: "view", t: "player_wallets_cdc", li: 0, lab: "CDC", title: "Watch a balance change arrive",
+    what: "A streaming read through a replication slot of its own. Leave it open and run the UPDATE shown in the pop-up.",
+    look: "BOT_001's row changes within a second: CDC, no polling." },
+  { a: "create", t: "feature_store", li: 1, lab: "02", title: "Create the online feature store",
+    what: "<b>fluss.betting.player_feature_store</b>: a Fluss primary-key table, one row per player, every feature a column. It lives in Fluss, not in the session.",
+    look: "The tall Fluss box turns solid.",
+    done: s => s.nodes.feature_store.exists },
+  { a: "deploy", t: "jobA", li: 1, lab: "03", title: "Deploy Job A · CDC dimensions",
+    what: "Joins players with wallets and writes kyc_tier, balance and lifetime_deposits for every player — only those columns; the windowed jobs fill the rest.",
+    look: "Job A's arrows turn green; the feature store goes amber, then green when rows are confirmed.",
+    done: s => s.edges.jobA.state === "running",
+    until: s => s.nodes.feature_store.state === "live", wait: "The feature store turns green once Job A has snapshotted PostgreSQL and written its first rows." },
+  { a: "view", t: "feature_store", li: 1, lab: "03", title: "Look inside the feature store",
+    what: "A bounded read of the Fluss table: 200 current rows, one per player.",
+    look: "One row per player: dimensions filled in, windowed features still 0." },
+  { a: "create", t: "bets", li: 2, lab: "01", title: "Register the bets topic",
+    what: "Describes the Kafka topic <b>bets</b> as a table, with <b>event_ts</b> as event time and <b>proc_time</b> for the lookup join later.",
+    look: "The box turns green: the generators have been publishing all along.",
+    done: s => s.nodes.bets.exists },
+  { a: "deploy", t: "jobB1", li: 2, lab: "04", title: "Deploy B1 · bet velocity",
+    what: "Bets per player in a <b>10-minute HOP window</b> sliding every 10 s, LEFT JOINed with a wider window so a quiet player resets to 0.",
+    look: "The job box turns green.",
+    done: s => s.edges.jobB1.state === "running" },
+  { a: "deploy", t: "jobB2", li: 2, lab: "04", title: "Deploy B2 · live ratio and average odds",
+    what: "Two features from one 15-minute window, written to their own two columns of the same row.",
+    look: "The job box turns green.",
+    done: s => s.edges.jobB2.state === "running" },
+  { a: "deploy", t: "jobB3", li: 2, lab: "04", title: "Deploy B3 · stake and sport variety",
+    what: "Total stake and distinct sports over 30 minutes.",
+    look: "Three jobs now write the same Fluss row, none of them touching another's columns.",
+    done: s => s.edges.jobB3.state === "running" },
+  { a: "create", t: "bet_settlements", li: 3, lab: "01", title: "Register the settlements topic",
+    what: "Win, loss or void for every bet, read from the earliest offset.",
+    look: "The box turns green.",
+    done: s => s.nodes.bet_settlements.exists },
+  { a: "deploy", t: "jobC1", li: 3, lab: "04", title: "Deploy C1 · net P&L",
+    what: "Stakes minus payouts per player over 30 minutes.",
+    look: "The job box turns green.",
+    done: s => s.edges.jobC1.state === "running" },
+  { a: "deploy", t: "jobC2", li: 3, lab: "04", title: "Deploy C2 · loss streak",
+    what: "<b>MATCH_RECOGNIZE</b> with pattern <b>L+ W</b>: a run of losses closed by a win. Event-driven, not windowed.",
+    look: "The job box turns green.",
+    done: s => s.edges.jobC2.state === "running" },
+  { a: "create", t: "login_events", li: 3, lab: "01", title: "Register the logins topic",
+    what: "Every login with its country.",
+    look: "The box turns green.",
+    done: s => s.nodes.login_events.exists },
+  { a: "deploy", t: "jobD", li: 3, lab: "04", title: "Deploy D · geo mismatches",
+    what: "Distinct login countries per player over 15 minutes: more than one is the same account in two places.",
+    look: "All seven feature jobs run.",
+    done: s => s.edges.jobD.state === "running" },
+  { a: "create", t: "risk_scores", li: 4, lab: "01", title: "Register the risk_scores topic",
+    what: "The Kafka sink for scored bets.",
+    look: "The box turns solid.",
+    done: s => s.nodes.risk_scores.exists },
+  { a: "deploy", t: "risk_scoring", li: 4, lab: "05", title: "Deploy Risk scoring",
+    what: "Each bet looks up its player's row <b>FOR SYSTEM_TIME AS OF</b> its processing time — a point lookup into Fluss — and is scored by rules.",
+    look: "risk_scores turns green.",
+    done: s => s.edges.risk_scoring.state === "running" },
+  { a: "view", t: "risk_scores", li: 4, lab: "05", title: "Watch bets being scored",
+    what: "A streaming read of the risk_scores topic, from now on.",
+    look: "Mostly NORMAL; enrichment_lag_ms shows how fresh the features were." },
+  { a: "create", t: "risk_score_log", li: 5, lab: "01", title: "Register the alert table",
+    what: "The JDBC table for PostgreSQL's risk_score_log, keyed by bet_id.",
+    look: "The box turns solid.",
+    done: s => s.nodes.risk_score_log.exists },
+  { a: "deploy", t: "risk_log", li: 5, lab: "05", title: "Deploy Alert log",
+    what: "Reads risk_scores back, drops NORMAL and upserts the alerts into PostgreSQL.",
+    look: "The job box turns green; risk_score_log follows once an alert is written.",
+    done: s => s.edges.risk_log.state === "running",
+    until: s => s.nodes.risk_score_log.state === "live", wait: "risk_score_log turns green with the first alert — fire an outlier to make one now." },
+  { a: "open", t: "outliner", li: 5, lab: "datagen", title: "Fire an outlier",
+    what: "The outlier generator's buttons publish a burst for one player: <b>BOT</b> (20 bets in 10 minutes), <b>GEO</b> (logins from two countries), a loss streak…",
+    look: "Within seconds the player's features cross a threshold and their next bet scores as an alert." },
+  { a: "view", t: "risk_score_log", li: 5, lab: "05", title: "Find the alert",
+    what: "A bounded read of risk_score_log, newest first.",
+    look: "BOT_001 as FRAUD_HIGH with BOT_VELOCITY, GEO_001 with GEO_MISMATCH." },
+  { a: "open", t: "grafana", li: 5, lab: "Grafana", title: "Open the dashboard",
+    what: "Grafana's Betting Features — Real-Time Risk Pipeline, reading risk_score_log.",
+    look: "Alerts by level and rule, and the pipeline's latency over time." },
+];
+// What each kind of button does, for the hover explanations.
+const ACTION_TIP = {
+  create: "Opens the CREATE statement. Edit it if you like, then run it.",
+  view: "Opens a query and shows its rows live. Closing the pop-up cancels the query.",
+  deploy: "Opens the job's INSERT INTO statement; Deploy submits it as a long-running Flink job.",
+  open: "Opens this tool in a new tab.",
+};
+const NODE_TIP = {
+  grafana: ["Grafana · Risk pipeline", "The dashboard, reading risk_score_log from PostgreSQL."],
+  inference: ["Inference service", "A Python service that answers POST /score with the player's features, read from the same Fluss table with pyfluss: the online feature store serving outside Flink."],
+  outliner: ["Outlier generator", "A web page that publishes a burst of suspicious events for one player (BOT_001, GEO_001, …) to the same Kafka topics."],
+};
+const NODE_NAME = { players_cdc: "players_cdc", player_wallets_cdc: "player_wallets_cdc", bets: "bets",
+  bet_settlements: "bet_settlements", login_events: "login_events", feature_store: "fluss · player_feature_store",
+  risk_scores: "risk_scores", risk_score_log: "risk_score_log",
+  jobA: "jobA-cdc-dimensions", jobB1: "jobB1-bet-velocity", jobB2: "jobB2-live-ratio-avg-odds",
+  jobB3: "jobB3-stake-sport-variety", jobC1: "jobC1-net-pnl", jobC2: "jobC2-loss-streak", jobD: "jobD-geo-mismatches",
+  risk_scoring: "risk-scoring-kafka", risk_log: "risk-score-log-postgres",
+  grafana: "Grafana", inference: "Inference service", outliner: "Outlier generator" };
+
+const seenKey = () => `pipeline.guide.seen.${(session || "").slice(0, 8)}`;
+function seenSet() { try { return new Set(JSON.parse(store.get(seenKey()) || "[]")); } catch { return new Set(); } }
+function guideSeen(a, t) {
+  if (!session || !GUIDE.some(g => !g.done && g.a === a && g.t === t)) return;
+  const s = seenSet(); s.add(`${a}:${t}`); store.set(seenKey(), JSON.stringify([...s]));
+  guideUpdate();
+}
+const stepDone = (g, seen) => g.done ? !!status && g.done(status) : seen.has(`${g.a}:${g.t}`);
+
+function guideUpdate() {
+  document.body.classList.toggle("guided", guideOn);
+  $("guideBtn").setAttribute("aria-pressed", guideOn);
+  const lis = [...$("steps").querySelectorAll("ol > li")];
+  if (!guideOn || !status) {
+    $("guide").hidden = true; $("guideRing").toggleAttribute("hidden", true); lis.forEach(li => li.classList.remove("done", "now"));
+    return;
+  }
+  const seen = seenSet(), done = GUIDE.map(g => stepDone(g, seen));
+  const i = done.indexOf(false);
+  guideStep = i < 0 ? null : GUIDE[i];
+  // Still settling: a done step whose result is not visible yet (a box not green yet).
+  const waiting = GUIDE.find((g, k) => done[k] && g.until && !g.until(status));
+  lis.forEach((li, k) => {
+    const mine = GUIDE.map((g, j) => [g, j]).filter(([g]) => g.li === k);
+    li.classList.toggle("done", mine.length > 0 && mine.every(([, j]) => done[j]));
+    li.classList.toggle("now", !!guideStep && guideStep.li === k);
+  });
+  const n = done.filter(Boolean).length;
+  const bar = `<div class="bar" aria-hidden="true"><i style="width:${Math.round(100 * n / GUIDE.length)}%"></i></div>`;
+  const waitHtml = waiting ? `<p class="wait"><span class="spinner" aria-hidden="true"></span><span>${waiting.wait}</span></p>` : "";
+  if (!guideStep) {
+    $("guide").innerHTML = `<div class="ghead">Guide<span class="spacer"></span><button type="button" data-g="off" title="Turn the guide off" aria-label="Turn the guide off">✕</button></div>
+      <h3>✓ The whole pipeline is built</h3>
+      <p>Bets, settlements and logins flow from Kafka and PostgreSQL through seven Flink jobs into one Fluss row per player; every new bet looks that row up, is scored, and alerts land in PostgreSQL and Grafana. Every box and job still explains itself on hover.</p>${waitHtml}
+      <div class="gact"><a data-g="restart" role="button" tabindex="0">Start the guide again</a></div>${bar}`;
+  } else {
+    const g = guideStep;
+    $("guide").innerHTML = `<div class="ghead">Next · ${i + 1} of ${GUIDE.length}<span class="lab">${g.lab}</span><span class="spacer"></span>
+        <button type="button" data-g="off" title="Turn the guide off" aria-label="Turn the guide off">✕</button></div>
+      <h3>${g.title}</h3>
+      <p>${g.what}</p>
+      <p class="look">${g.look}</p>${waitHtml}
+      <div class="gact"><button type="button" class="primary" data-g="do">${pillLabel(g)} →</button>
+        <button type="button" data-g="show" title="Pan and zoom to this step's button">Show me</button>
+        <span class="spacer"></span>${g.done ? "" : `<a data-g="skip" role="button" tabindex="0" title="Mark it done without opening it">Skip</a>`}</div>${bar}`;
+  }
+  $("guide").hidden = false;
+  guidePlace();
+}
+const pillLabel = g => ({ create: "Create", view: "View data", deploy: "Deploy", open: "Open" })[g.a];
+
+// The callout goes where it hides the least: in the free space above or below the diagram,
+// clear of the Suggested steps panel, and only next to the button itself when there is no
+// such space. A dashed line joins it to the button, which pulses.
+function guidePlace() {
+  const ring = $("guideRing"), link = $("guideLink"), box = $("guide");
+  if (!guideOn || box.hidden || !guideStep) {
+    ring.toggleAttribute("hidden", true); link.toggleAttribute("hidden", true);
+    // All done: the callout rests in the top-right corner.
+    if (guideOn && !guideStep && !box.hidden) Object.assign(box.style, { left: "auto", right: "16px", top: "16px", bottom: "auto" });
+    return;
+  }
+  const p = pill(guideStep.a, guideStep.t);
+  if (!p) return;
+  const r = p.querySelector("rect");
+  const x = +r.getAttribute("x"), y = +r.getAttribute("y"), w = +r.getAttribute("width");
+  Object.entries({ x: x - 4, y: y - 4, width: w + 8, height: 28 }).forEach(([k, v]) => ring.setAttribute(k, v));
+  ring.toggleAttribute("hidden", false);
+
+  const sr = stage.getBoundingClientRect(), pr = p.getBoundingClientRect();
+  const sw = sr.width, sh = sr.height, bw = box.offsetWidth, bh = box.offsetHeight, M = 16, gap = 18;
+  // The diagram's top and bottom edges on screen, from the current view.
+  const scale = view.z * fitScale(), vbY = view.cy - sh / scale / 2;
+  const diagTop = (CONTENT.y - vbY) * scale, diagBottom = (CONTENT.y + CONTENT.h - vbY) * scale;
+  const pin = { x: pr.left + pr.width / 2 - sr.left, top: pr.top - sr.top, bottom: pr.bottom - sr.top };
+  const steps = $("steps"), sp = steps.classList.contains("collapsed") ? null : (() => {
+    const q = steps.getBoundingClientRect(); return { l: q.left - sr.left, r: q.right - sr.left, t: q.top - sr.top, b: q.bottom - sr.top };
+  })();
+  const place = top => {
+    let left = Math.min(Math.max(pin.x - bw / 2, M), sw - bw - M);
+    if (sp && left < sp.r + M && left + bw > sp.l - M && top < sp.b && top + bh > sp.t) {
+      if (sp.r + M + bw <= sw - M) left = Math.max(left, sp.r + M);   // to the right of the panel
+      else return null;
+    }
+    return top >= M && top + bh <= sh - M ? { left, top } : null;
+  };
+  const spot = place(diagBottom + 24) || place(diagTop - 24 - bh) || place(pin.bottom + gap) || place(pin.top - gap - bh)
+    || { left: Math.min(Math.max(pin.x - bw / 2, M), sw - bw - M), top: Math.min(Math.max(pin.bottom + gap, M), sh - bh - M) };
+  Object.assign(box.style, { left: spot.left + "px", top: spot.top + "px", right: "auto", bottom: "auto" });
+
+  // The connector: from the callout's nearest edge to the button.
+  const below = spot.top > pin.bottom;
+  const x1 = Math.min(Math.max(pin.x, spot.left + 16), spot.left + bw - 16), y1 = below ? spot.top : spot.top + bh;
+  const y2 = below ? pin.bottom + 4 : pin.top - 4;
+  const line = link.querySelector("line"), dot = link.querySelector("circle");
+  Object.entries({ x1, y1, x2: pin.x, y2 }).forEach(([k, v]) => line.setAttribute(k, v));
+  dot.setAttribute("cx", pin.x); dot.setAttribute("cy", y2);
+  // No line when the callout already touches the button, or the button is off screen.
+  const visible = pin.x >= 0 && pin.x <= sw && pin.top >= 0 && pin.bottom <= sh;
+  link.toggleAttribute("hidden", !visible || Math.abs(y2 - y1) < gap + 4);
+}
+
+$("guide").addEventListener("click", e => {
+  const k = e.target.closest("[data-g]")?.dataset.g;
+  if (k === "off") setGuide(false);
+  else if (k === "do") onPill(guideStep.a, guideStep.t);
+  else if (k === "skip") guideSeen(guideStep.a, guideStep.t);
+  else if (k === "restart") { store.set(seenKey(), null); guideUpdate(); }
+  else if (k === "show") {
+    const [x, y, w] = PILLS.find(q => q[4] === guideStep.a && q[5] === guideStep.t);
+    view = { cx: x + w / 2, cy: y + 60, z: Math.max(view.z, 1.6) }; atFit = false; applyView();
+  }
+});
+$("guide").addEventListener("keydown", e => { if (e.key === "Enter" && e.target.matches("a[data-g]")) e.target.click(); });
+// Keep wheel and drags on the callout from panning the diagram behind it.
+$("guide").addEventListener("pointerdown", e => e.stopPropagation());
+function setGuide(on) {
+  guideOn = on;
+  // Keep the URL in step, so a reload or a shared link starts the same way.
+  const url = new URL(location.href);
+  url.searchParams.set("mode", on ? "guided" : "explore");
+  history.replaceState(null, "", url);
+  if (!on) $("gtip").hidden = true;
+  guideUpdate();
+}
+$("guideBtn").onclick = () => setGuide(!guideOn);
+
+// Hover (or keyboard focus) on a box, an arrow or a button explains it, while the guide is on.
+function tipFor(el) {
+  const pl = el.closest(".pill");
+  if (pl) {
+    const { action, target } = pl.dataset;
+    if (pl.classList.contains("src")) return [pl.getAttribute("aria-label"), "Opens the source system itself, outside Flink."];
+    const name = NODE_NAME[target] || NODE_TIP[target]?.[0] || target;
+    const about = ABOUT[aboutKey(action, target)] || NODE_TIP[target]?.[1] || "";
+    return [`${pillLabel({ a: action, t: target })} · ${name}`, `<span class="act">${ACTION_TIP[action]}</span> ${about}`];
+  }
+  const node = el.closest(".node[data-node]"), job = el.closest(".job[data-edge]");
+  if (node) {
+    const n = node.dataset.node, st = node.dataset.state;
+    const [title, text] = NODE_TIP[n] || [NODE_NAME[n] || n, ABOUT[n] || ""];
+    return [title + (st ? ` — ${STATE_LABEL[st] || st}` : ""), text];
+  }
+  if (job) {
+    const e = job.dataset.edge;
+    const [title, text] = NODE_TIP[e] || [NODE_NAME[e] || e, ABOUT[e] || ""];
+    return [title, text];
+  }
+  return null;
+}
+function showTip(el, x, y) {
+  const t = guideOn && !svg.classList.contains("panning") && tipFor(el);
+  if (!t || !t[1]) { $("gtip").hidden = true; return; }
+  $("gtip").innerHTML = `<b>${esc(t[0])}</b>${t[1]}`;
+  $("gtip").hidden = false;
+  const w = $("gtip").offsetWidth, h = $("gtip").offsetHeight;
+  $("gtip").style.left = Math.min(x + 14, innerWidth - w - 8) + "px";
+  $("gtip").style.top = (y + 18 + h > innerHeight - 8 ? y - h - 12 : y + 18) + "px";
+}
+svg.addEventListener("pointermove", e => { if (e.pointerType === "mouse") showTip(e.target, e.clientX, e.clientY); });
+svg.addEventListener("pointerleave", () => { $("gtip").hidden = true; });
+svg.addEventListener("focusin", e => { const r = e.target.getBoundingClientRect(); showTip(e.target, r.left, r.bottom); });
+svg.addEventListener("focusout", () => { $("gtip").hidden = true; });
+document.addEventListener("pointerdown", () => { $("gtip").hidden = true; });
+
+// ── The catalog browser (catalog.js) ─────────────────────────────────────────
+// The pop-ups are modal, so the panel cannot be clicked while one is open: a
+// double-clicked name is copied instead, ready to paste into a pop-up's SQL.
+catalogInit({
+  layout: $("layout"),
+  storeKey: "pipeline.catalog",
+  insert: async t => {
+    try { await navigator.clipboard.writeText(t); }
+    catch {   // no clipboard API outside a secure context
+      const ta = Object.assign(document.createElement("textarea"), { value: t });
+      document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    }
+    if ($("structure").open) $("structure").close();
+    setStatus(`copied ${t} — paste it into a pop-up's SQL`);
+  },
+  ddl: path => openStructure(path, true),
+  onToggle: () => { placeSteps(); atFit ? fit() : applyView(); },   // the stage got narrower or wider
+  // The Job Catalog tab: each job links to its page in the Flink Web UI (running or completed).
+  jobs: { link: j => `${location.protocol}//${host}:8081/#/job/${j.active ? "running" : "completed"}/${j.jid}/overview` },
+  foot: "Tables: click for columns, double-click to copy the name; <b>Info</b> / <b>DDL</b> show the structure. Jobs: <b>Flink UI</b> opens the job in the Flink Web UI.",
+});
+$("structInsert").textContent = "Copy name";
+$("structInsert").title = "Copy the table's name, to paste into a pop-up's SQL";
+
+// ── Start ────────────────────────────────────────────────────────────────────
+drawPills();
+guideUpdate();
+// No (valid) ?mode=: ask. Closing it with Esc counts as "on my own" — the Guide button is there later.
+if (MODE !== "guided" && MODE !== "explore") {
+  let chosen = false;
+  $("welcome").addEventListener("click", e => {
+    const w = e.target.closest("[data-w]")?.dataset.w;
+    if (w) { chosen = true; setGuide(w === "on"); $("welcome").close(); }
+  });
+  $("welcome").addEventListener("close", () => { if (!chosen) setGuide(false); });
+  $("welcome").showModal();
+}
+placeSteps();
+fit();
+(async () => {
+  try {
+    await ensureSession();
+    catalogReload();
+    sql = await api("/api/pipeline/sql");
+    await poll();
+  } catch (e) { setStatus("could not connect: " + e.message.split("\n")[0], true); }
+  setInterval(poll, 5000);
+})();
+</script>
+</body>
+</html>

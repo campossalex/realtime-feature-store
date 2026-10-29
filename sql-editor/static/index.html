@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flink SQL Editor</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/runmode/runmode.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/display/placeholder.min.js"></script>
+<link rel="stylesheet" href="/static/common.css">
+<link rel="stylesheet" href="/static/catalog.css">
+<script src="/static/common.js"></script>
+<script src="/static/catalog.js"></script>
+<script>
+  // Before the stylesheet, so a saved choice applies on first paint instead of flashing
+  // the OS theme. Same localStorage key prefix as the rest of the page (see `store`).
+  try {
+    const t = localStorage.getItem("sqlEditor.theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch {}
+</script>
+<style>
+  * { box-sizing: border-box; }
+  /* The page never scrolls: header, toolbar and editor stay put, and only the result
+     pane scrolls. The editor's height is --editor-h, set by dragging the splitter. */
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg); display: flex; flex-direction: column;
+         overflow: hidden; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  /* Shrinks with an ellipsis rather than wrapping the header onto a second row. */
+  #status { color: var(--muted); font-size: 13px; flex: 1 1 120px; min-width: 0;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status.bad { color: var(--err); }
+  header .spacer { flex: 1; }
+  header > a { color: var(--accent); font-size: 13px; text-decoration: none; white-space: nowrap; }
+  header > a:hover { text-decoration: underline; }
+  #theme { width: 32px; height: 32px; padding: 0; font-size: 16px; line-height: 1; }
+  #layout { flex: 1; min-height: 0; display: flex; position: relative; }
+  main { flex: 1; min-height: 0; min-width: 0; padding: 12px 16px 16px;
+         display: flex; flex-direction: column; --editor-h: 300px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; flex: none; }
+  select, button { font: inherit; padding: 6px 10px; border-radius: 6px;
+                   border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
+  select { min-width: 0; max-width: 100%; flex: 1 1 280px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+  button:disabled { opacity: .5; cursor: default; }
+  label { color: var(--muted); font-size: 13px; display: flex; gap: 4px; align-items: center; }
+  /* The usage hint lives behind an info icon: shown on hover, and on focus so a tap
+     or Tab reaches it too. */
+  .info { position: relative; display: inline-flex; }
+  .info button { width: 26px; height: 26px; padding: 0; border-radius: 50%; color: var(--muted);
+                 font: 600 13px/1 Georgia, serif; font-style: italic; }
+  .info button:hover, .info button:focus-visible { color: var(--fg); border-color: var(--muted); }
+  .info .tip { display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 10;
+               width: max-content; max-width: min(340px, calc(100vw - 32px)); padding: 8px 10px;
+               background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+               border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.18); font-size: 12px; line-height: 1.5; }
+  .info:hover .tip, .info:focus-within .tip { display: block; }
+  .info kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; }
+  #editorPane { height: var(--editor-h); flex: none; }
+  .CodeMirror { height: 100%; border: 1px solid var(--border); border-radius: 6px;
+                background: var(--panel); color: var(--fg); font-family: var(--mono); font-size: 13px; }
+  .CodeMirror-gutters { background: var(--panel); border-right: 1px solid var(--border); }
+  .CodeMirror-linenumber { color: var(--muted); }
+  .CodeMirror-cursor { border-left-color: var(--fg); }
+  .CodeMirror pre.CodeMirror-placeholder { color: var(--muted); font-style: italic; }
+  .CodeMirror-selected, .CodeMirror-focused .CodeMirror-selected { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+  #splitter { flex: none; height: 14px; cursor: row-resize; display: flex; align-items: center;
+              justify-content: center; touch-action: none; user-select: none; outline: none; }
+  #splitter::before { content: ""; width: 48px; height: 4px; border-radius: 2px; background: var(--border); }
+  #splitter:hover::before, #splitter:focus-visible::before, #splitter.dragging::before { background: var(--accent); }
+  body.resizing { cursor: row-resize; user-select: none; }
+  #resultsBar { flex: none; display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+                font-size: 12px; color: var(--muted); }
+  #resultsBar[hidden] { display: none; }
+  #resultsBar .spacer { flex: 1; }
+  #resultsBar button { font-size: 12px; padding: 3px 10px; }
+  #results { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+  /* The empty state fills the results pane, like a result panel would. */
+  #results:empty::before { content: "Results appear here."; color: var(--muted); font-size: 13px;
+                           padding: 24px; border: 1px dashed var(--border); border-radius: 6px;
+                           flex: 1; display: flex; align-items: center; justify-content: center; }
+  .out { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+         flex: none; display: flex; flex-direction: column; }
+  /* The last statement's panel — usually the SELECT — takes the rest of the pane, and its
+     grid scrolls inside it with the header row pinned. Earlier ones (DDL, SET) stay small. */
+  .out.fill { flex: 1 0 200px; }
+  .out .body { min-height: 0; display: flex; flex-direction: column; }
+  .out.fill .body { flex: 1; }
+  /* The statement header: tinted, syntax-highlighted like the editor, with a bar on the
+     left in the panel's state colour — accent while running, green done, red failed. */
+  .out { --state: var(--accent); }
+  .out.done { --state: var(--ok); } .out.fail { --state: var(--err); }
+  .out .head { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px 8px 10px;
+               background: var(--stmt-bg); border-left: 3px solid var(--state);
+               border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .out .stmt { font-family: var(--mono); font-size: 13px; font-weight: 500; white-space: nowrap;
+               overflow: hidden; text-overflow: ellipsis; flex: 1 1 200px; min-width: 0; }
+  /* The arrow expands the full, formatted statement below the one-line header. */
+  .out .toggle { flex: none; align-self: center; border: 0; background: none; padding: 2px 4px;
+                 margin: -2px 0; color: var(--muted); cursor: pointer; font-size: 11px; line-height: 1;
+                 border-radius: 4px; transition: transform .15s; }
+  .out .toggle:hover, .out .toggle:focus-visible { color: var(--fg); background: var(--border); }
+  .out.expanded .toggle { transform: rotate(90deg); }
+  .out .stmt { cursor: pointer; }
+  .out .full { display: none; margin: 0; padding: 8px 12px 10px 32px; flex: none;
+               background: var(--stmt-bg); border-left: 3px solid var(--state);
+               border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12.5px;
+               line-height: 1.5; white-space: pre; overflow: auto; max-height: 40vh; }
+  .out.expanded .full { display: block; }
+  .out .state { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .out .state.live { color: var(--accent); } .out .state.done { color: var(--ok); }
+  .out .state.fail { color: var(--err); }
+  /* Cancel sits on the running panel itself, next to its state. */
+  .out .stop { display: none; align-self: center; font-size: 12px; padding: 2px 10px; margin: -3px 0;
+               color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, var(--border)); }
+  .out.live .stop { display: inline-block; }
+  .out .stop:hover:not(:disabled) { background: var(--err-bg); }
+  .out a { color: var(--accent); font-size: 12px; }
+  .grid { overflow: auto; max-height: 120px; }
+  .out.fill .grid { flex: 1; max-height: none; min-height: 0; }
+  /* Always-visible scrollbars: macOS otherwise hides them until you scroll. Styling the
+     WebKit scrollbar turns off the overlay kind; Firefox gets the standard properties
+     (set only there, since in Chrome they would override the WebKit styling). */
+  .grid::-webkit-scrollbar { width: 10px; height: 10px; }
+  .grid::-webkit-scrollbar-track { background: var(--stmt-bg); }
+  .grid::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 5px; border: 2px solid var(--stmt-bg); }
+  .grid::-webkit-scrollbar-thumb:hover { background: var(--fg); }
+  .grid::-webkit-scrollbar-corner { background: var(--stmt-bg); }
+  @supports not selector(::-webkit-scrollbar) { .grid { scrollbar-color: var(--muted) var(--stmt-bg); } }
+  /* With no rows yet, the grid is just its header: it must not stretch, or it pushes the
+     waiting indicator or "no rows" below the bottom of the panel. */
+  .out.fill .grid.no-rows { flex: none; }
+  table { border-collapse: collapse; font-family: var(--mono); font-size: 12px; width: max-content; min-width: 100%; }
+  th, td { padding: 4px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; }
+  td.null { color: var(--muted); font-style: italic; }
+  /* A long or multi-line value (a DDL string, a plan, a JSON blob): one line of preview
+     in the grid, and a button that opens the whole value in the viewer dialog. */
+  td.long { max-width: 480px; }
+  td.long .preview { display: inline-block; max-width: calc(100% - 30px); overflow: hidden;
+                     text-overflow: ellipsis; vertical-align: middle; }
+  td.long .expand, .doc .bar button { font-size: 12px; padding: 1px 6px; margin-left: 6px;
+                     vertical-align: middle; color: var(--muted); }
+  td.long .expand:hover, .doc .bar button:hover { color: var(--fg); border-color: var(--muted); }
+  /* A result that is ONE value (SHOW CREATE TABLE, EXPLAIN) is shown as a document, not
+     a one-cell table: indentation kept, SQL highlighted like the editor. */
+  .doc { display: flex; flex-direction: column; min-height: 0; }
+  .out.fill .doc { flex: 1; }
+  .doc .bar { display: flex; align-items: center; gap: 4px; padding: 6px 12px;
+              border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  .doc .bar .spacer { flex: 1; }
+  .doc pre, #viewer pre { margin: 0; padding: 10px 14px; font-family: var(--mono); font-size: 12.5px;
+              line-height: 1.55; white-space: pre; overflow: auto; tab-size: 4; }
+  .doc pre { max-height: 40vh; }
+  .out.fill .doc pre { flex: 1; max-height: none; min-height: 0; }
+  #viewer { width: min(1100px, calc(100vw - 32px)); height: min(80vh, 900px); padding: 0;
+            border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+            color: var(--fg); box-shadow: 0 12px 48px rgba(0,0,0,.35); }
+  #viewer[open] { display: flex; flex-direction: column; }
+  #viewer::backdrop { background: rgba(10, 12, 16, .55); }
+  #viewer header { padding: 8px 12px; gap: 8px; flex-wrap: nowrap; }
+  #viewer header h2 { font-size: 14px; margin: 0; font-weight: 600; overflow: hidden;
+                      text-overflow: ellipsis; white-space: nowrap; }
+  #viewer header .meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #viewer pre { flex: 1; min-height: 0; }
+  #viewer label { margin-right: 4px; }
+  #viewer.wrap pre { white-space: pre-wrap; word-break: break-word; }
+  .empty { padding: 10px 12px; color: var(--muted); font-size: 13px; }
+  .error { background: var(--err-bg); color: var(--err); padding: 10px 12px; font-size: 13px; }
+  .error .tip { color: var(--fg); margin-top: 6px; }
+  .error .tip:empty { display: none; }
+  .error pre { white-space: pre-wrap; font-family: var(--mono); font-size: 11px; max-height: 300px; overflow: auto; }
+  @media (max-width: 600px) { main { padding: 12px 16px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <button id="catalogToggle" type="button" aria-controls="catalog" aria-expanded="false"
+          title="Browse catalogs, databases and tables"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"
+    fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>
+    <path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg>Catalog</button>
+  <h1>Flink SQL Editor</h1>
+  <span id="status">connecting…</span>
+  <span class="spacer"></span>
+  <a href="/pipeline" title="The same session, as the architecture diagram: create, deploy and watch each step">Pipeline Builder →</a>
+  <label title="Run flink_sql/01_sources_and_catalogs.sql into the new session, like sql-client.sh --init">
+    <input type="checkbox" id="ddl"> preload DDL</label>
+  <button id="newSession">New session</button>
+  <button id="theme" type="button"></button>
+</header>
+<div id="layout">
+<main>
+  <div class="toolbar">
+    <select id="examples"><option value="">Examples: DDL, jobs and analytics queries…</option></select>
+    <button id="run" class="primary" disabled>Run</button>
+    <span class="info">
+      <button type="button" aria-label="How running works" aria-describedby="runTip">i</button>
+      <span class="tip" id="runTip" role="tooltip"><kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd> runs the selection, or everything.
+        Statements run in order; a streaming SELECT runs until you cancel it.</span>
+    </span>
+  </div>
+  <div id="editorPane"><textarea id="sql" placeholder="Write Flink SQL here, or pick one from the Examples menu. ⌘/Ctrl+Enter runs it."></textarea></div>
+  <div id="splitter" role="separator" aria-orientation="horizontal" aria-label="Resize editor and results"
+       tabindex="0" title="Drag to resize · double-click to reset"></div>
+  <!-- Above the result panels, only while there are some: what the last run did, and
+       Clear. Cancel lives on the running statement's own panel. -->
+  <div id="resultsBar" hidden>
+    <span id="resultsSummary"></span><span class="spacer"></span>
+    <button type="button" id="clear" title="Remove every result panel">Clear results</button>
+  </div>
+  <div id="results"></div>
+<!-- Full-size viewer for one long value. A native <dialog>: Esc and the backdrop close
+     it, and focus stays inside while it is open. -->
+<dialog id="viewer" aria-labelledby="viewerTitle">
+  <header>
+    <h2 id="viewerTitle"></h2><span class="meta" id="viewerMeta"></span>
+    <span class="spacer"></span>
+    <label><input type="checkbox" id="viewerWrap"> wrap lines</label>
+    <button type="button" id="viewerCopy">Copy</button>
+    <button type="button" id="viewerClose" aria-label="Close">✕</button>
+  </header>
+  <pre id="viewerBody"></pre>
+</dialog>
+</main>
+</div>
+<script>
+const MAX_ROWS = 1000;
+let session = null, busy = false, stopRequested = false, current = null;
+
+const editor = CodeMirror.fromTextArea($("sql"), {
+  mode: "text/x-flinksql", lineNumbers: true, indentUnit: 2, lineWrapping: false,
+  extraKeys: { "Cmd-Enter": () => runScript(), "Ctrl-Enter": () => runScript() },
+});
+
+if (store.get("sql") !== null) editor.setValue(store.get("sql"));
+let saveTimer;
+editor.on("change", () => { clearTimeout(saveTimer); saveTimer = setTimeout(() => store.set("sql", editor.getValue()), 300); });
+
+
+function setStatus(text, bad) { $("status").textContent = text; $("status").className = bad ? "bad" : ""; }
+// Clear is off while a script runs: its panels are still being written to.
+function setBusy(b) { busy = b; $("run").disabled = b || !session; $("newSession").disabled = b; $("clear").disabled = b; }
+
+// The bar above the results: shown with the first panel, gone with the last.
+function resultsBar(summary) {
+  if (summary !== undefined) $("resultsSummary").textContent = summary;
+  $("resultsBar").hidden = !$("results").children.length;
+}
+
+async function openSession() {
+  if (session) navigator.sendBeacon(`/api/close/${session}`);
+  session = null; store.set("session", null); setBusy(false);
+  const ddl = $("ddl").checked;
+  setStatus(ddl ? "opening session and loading DDL…" : "opening an empty session…");
+  try {
+    const s = await api("/api/session", { ddl });
+    session = s.session; store.set("session", session);
+    setStatus(`session ${session.slice(0, 8)} · ${s.ddl ? s.ddl + " DDL statements loaded" : "new, empty"}`);
+    catalogReload();
+  } catch (e) { setStatus(e.message.split("\n")[0], true); }
+  setBusy(false);
+}
+
+// Reuse the stored session if the gateway still has it; the heartbeat is the check.
+async function resumeOrOpen() {
+  const saved = store.get("session");
+  if (saved) {
+    try {
+      await api(`/api/heartbeat/${saved}`, {});
+      session = saved;
+      setStatus(`session ${session.slice(0, 8)} · reconnected — your tables and views are still there`);
+      setBusy(false);
+      catalogReload();
+      return;
+    } catch { store.set("session", null); }
+  }
+  // A new session (first visit, or the old one is gone — e.g. the environment was
+  // reset): start from an empty editor. The saved draft belonged to the old session.
+  editor.setValue(""); store.set("sql", null);
+  await openSession();
+}
+
+// ── Output panels ─────────────────────────────────────────────────────────────
+
+// ── Long values: highlighting, copying, the viewer dialog ────────────────────
+
+const LONG = 120;   // characters; anything longer, or multi-line, gets the viewer
+const text = v => typeof v === "object" ? JSON.stringify(v, null, 2) : String(v);
+const isLong = t => t.length > LONG || t.includes("\n");
+const lines = t => { const n = t.split("\n").length; return `${n} line${n === 1 ? "" : "s"}`; };
+// Plans (EXPLAIN, "== Abstract Syntax Tree ==") stay plain: SQL colouring there only
+// lights up operator names like `group` and `table` at random.
+const looksLikeSql = t => /^\s*(CREATE|ALTER|SELECT|INSERT|WITH)\b/i.test(t);
+
+// Syntax-highlight SQL (a SHOW CREATE result, an EXPLAIN plan) with the editor's own
+// mode; anything else goes in as plain text. Either way whitespace is kept verbatim.
+function fillPre(pre, t) {
+  if (looksLikeSql(t)) CodeMirror.runMode(t, "text/x-flinksql", pre);
+  else pre.textContent = t;
+}
+
+
+let viewerText = "";
+function openViewer(title, t) {
+  viewerText = t;
+  $("viewerTitle").textContent = title;
+  $("viewerMeta").textContent = `${lines(t)} · ${t.length} chars`;
+  fillPre($("viewerBody"), t);
+  $("viewerBody").scrollTo(0, 0);
+  $("viewer").showModal();
+}
+$("viewerClose").onclick = () => $("viewer").close();
+$("viewerCopy").onclick = () => copyText(viewerText, $("viewerCopy"));
+$("viewerWrap").onchange = e => { $("viewer").classList.toggle("wrap", e.target.checked); store.set("viewerWrap", e.target.checked ? "1" : null); };
+$("viewerWrap").checked = store.get("viewerWrap") === "1";
+$("viewer").classList.toggle("wrap", $("viewerWrap").checked);
+// A click on the backdrop lands on the <dialog> element itself, outside its content box.
+$("viewer").addEventListener("click", e => {
+  const r = $("viewer").getBoundingClientRect();
+  if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) $("viewer").close();
+});
+
+function cell(v, column) {
+  const td = document.createElement("td");
+  if (v === null || v === undefined) { td.textContent = "NULL"; td.className = "null"; return td; }
+  const t = text(v);
+  if (!isLong(t)) { td.textContent = t; return td; }
+  td.className = "long";
+  const preview = document.createElement("span");
+  preview.className = "preview";
+  preview.textContent = t.split("\n")[0];
+  preview.title = "Open the full value";
+  const btn = document.createElement("button");
+  btn.type = "button"; btn.className = "expand"; btn.textContent = "⤢";
+  btn.setAttribute("aria-label", `Open the full ${column} value`);
+  preview.onclick = btn.onclick = () => openViewer(column, t);
+  td.append(preview, btn);
+  return td;
+}
+
+// One row, one column, long: SHOW CREATE TABLE / VIEW, EXPLAIN. Shown as a document.
+function renderDoc(p, t) {
+  const doc = document.createElement("div");
+  doc.className = "doc";
+  doc.innerHTML = `<div class="bar"><span></span><span class="spacer"></span>
+    <button type="button" class="copy">Copy</button><button type="button" class="open">⤢ Expand</button></div><pre></pre>`;
+  doc.querySelector(".bar span").textContent = `${p.columns[0]} · ${lines(t)}`;
+  fillPre(doc.querySelector("pre"), t);
+  doc.querySelector(".copy").onclick = e => copyText(t, e.currentTarget);
+  doc.querySelector(".open").onclick = () => openViewer(p.stmtTitle, t);
+  return doc;
+}
+
+function newPanel(stmt) {
+  const el = document.createElement("div");
+  el.className = "out";
+  el.innerHTML = `<div class="head"><button class="toggle" type="button" aria-expanded="false" title="Show the full statement">▶</button><span class="stmt"></span><span class="job"></span><span class="state live">running…</span><button class="stop" type="button" title="Cancel this statement, and skip the ones after it">Cancel</button></div><pre class="full"></pre><div class="body"></div>`;
+  CodeMirror.runMode(stmt.replace(/\s+/g, " "), "text/x-flinksql", el.querySelector(".stmt"));
+  // Comments were stripped by the splitter, which leaves blank lines where they were.
+  CodeMirror.runMode(stmt.replace(/\n\s*\n/g, "\n"), "text/x-flinksql", el.querySelector(".full"));
+  el.classList.add("live");
+  el.querySelector(".stop").onclick = e => { stopRequested = true; e.currentTarget.disabled = true; e.currentTarget.textContent = "Cancelling…"; };
+  const toggle = el.querySelector(".toggle");
+  const flip = () => {
+    const open = el.classList.toggle("expanded");
+    toggle.setAttribute("aria-expanded", open);
+    toggle.title = open ? "Hide the full statement" : "Show the full statement";
+  };
+  toggle.onclick = flip;
+  el.querySelector(".stmt").onclick = flip;
+  for (const other of $("results").children) other.classList.remove("fill");
+  el.classList.add("fill");
+  $("results").append(el);
+  resultsBar();
+  el.scrollIntoView({ block: "nearest" });
+  const p = { el, columns: [], rows: [], changes: 0, stmtTitle: stmt.replace(/\s+/g, " ").trim(),
+              live: true, jobId: null, started: Date.now() };
+  p.state = (text, cls) => { const s = el.querySelector(".state"); s.textContent = text; s.className = "state " + cls;
+                              el.classList.toggle("done", cls === "done"); el.classList.toggle("fail", cls === "fail");
+                              if (cls !== "live") { p.live = false; clearInterval(p.timer); p.waitEl.remove(); el.classList.remove("live"); } };
+  p.waitEl = waitingEl();
+  p.timer = setInterval(() => paintWaiting(p), 1000);
+  // Once faded in, stay visible: re-inserting the node would restart the delayed fade.
+  setTimeout(() => p.waitEl.classList.add("shown"), 700);
+  paintWaiting(p);
+  el.querySelector(".body").append(p.waitEl);
+  return p;
+}
+
+function waitingEl() {
+  const w = document.createElement("div");
+  w.className = "waiting"; w.setAttribute("role", "status");
+  w.innerHTML = `<span class="spinner" aria-hidden="true"></span><div><span class="msg"></span><span class="elapsed"></span><div class="hint"></div></div>`;
+  return w;
+}
+
+// Before the gateway reports a job, the statement is still being planned and submitted;
+// after, the job runs but has not produced a row.
+function paintWaiting(p) {
+  const secs = Math.floor((Date.now() - p.started) / 1000);
+  p.waitEl.querySelector(".msg").textContent = p.jobId ? "Flink job running — waiting for the first rows…" : "Running the statement…";
+  p.waitEl.querySelector(".elapsed").textContent = secs ? `${secs}s` : "";
+  p.waitEl.querySelector(".hint").textContent = p.jobId && secs >= 10
+    ? "A streaming query with nothing to show yet keeps waiting until Cancel."
+    : "";
+}
+
+// Apply the changelog the way the SQL client's table mode does: a retraction removes
+// the row it retracts, so an aggregate shows its current value, not its history.
+function apply(p, rows) {
+  for (const r of rows) {
+    p.changes++;
+    if (r.kind === "UPDATE_BEFORE" || r.kind === "DELETE") {
+      const key = JSON.stringify(r.fields);
+      const i = p.rows.findIndex(x => JSON.stringify(x) === key);
+      if (i >= 0) p.rows.splice(i, 1);
+    } else {
+      p.rows.push(r.fields);
+    }
+  }
+  if (p.rows.length > MAX_ROWS) p.rows.splice(0, p.rows.length - MAX_ROWS);
+}
+
+function render(p) {
+  const body = p.el.querySelector(".body");
+  // A poll that changed nothing changes nothing on screen: skip it, so the waiting
+  // indicator is not torn down and rebuilt, and a scrollbar drag is not interrupted.
+  const shape = `${p.live}|${p.rows.length}|${p.changes}|${p.columns.join()}`;
+  if (p.shape === shape) return;
+  p.shape = shape;
+  if (!p.columns.length) {
+    // A result with no rows can arrive without its column names, too.
+    if (p.live) body.replaceChildren(p.waitEl);
+    else body.innerHTML = `<div class="empty">no rows</div>`;
+    return;
+  }
+  if (p.columns.length === 1 && p.rows.length === 1 && p.rows[0][0] != null && isLong(text(p.rows[0][0]))) {
+    body.replaceChildren(renderDoc(p, text(p.rows[0][0])));
+    return;
+  }
+  const table = document.createElement("table");
+  const hr = table.createTHead().insertRow();
+  for (const c of p.columns) { const th = document.createElement("th"); th.textContent = c; hr.appendChild(th); }
+  const tb = table.createTBody();
+  for (const row of p.rows) { const tr = tb.insertRow(); row.forEach((v, i) => tr.appendChild(cell(v, p.columns[i]))); }
+  // The grid is the scroll container: keep the same element across renders and swap only
+  // the table inside, so its scroll position and an in-progress scrollbar drag survive.
+  const grid = p.grid || (p.grid = document.createElement("div"));
+  grid.className = p.rows.length ? "grid" : "grid no-rows";
+  grid.replaceChildren(table);
+  if (body.firstChild !== grid || body.childNodes.length !== 1) body.replaceChildren(grid);
+  if (!p.rows.length) {
+    if (p.live) body.append(p.waitEl);
+    else body.insertAdjacentHTML("beforeend", `<div class="empty">no rows</div>`);
+  }
+}
+
+function showError(p, msg) {
+  const lines = msg.split("\n").map(l => l.trim()).filter(Boolean);
+  // Flink wraps the real error in layers of its own ("Failed to fetchResults.", "Could
+  // not execute CreateTable in path ..."); the root cause — the last one — is the one
+  // that says what went wrong.
+  const causes = lines.filter(l => l.startsWith("Caused by:") && !l.includes(".table.gateway."));
+  const cause = causes[causes.length - 1];
+  const headline = cause ? cause.replace(/^Caused by:\s*(\w+\.)*/, "") : (lines[0] || msg);
+  const div = document.createElement("div"); div.className = "error";
+  div.innerHTML = `<div class="msg"></div><div class="tip"></div><details><summary>full error</summary><pre></pre></details>`;
+  div.querySelector(".msg").textContent = headline;
+  // The session outlives page reloads, so running a DDL file a second time is the
+  // common way to get here. Say so, and how to get out of it.
+  const exists = headline.match(/^(\w+?)AlreadyExistException/);
+  if (exists) {
+    const kind = exists[1].toLowerCase() === "table" ? "table (or view)" : exists[1].toLowerCase();
+    div.querySelector(".tip").textContent =
+      `This ${kind} was already created earlier in this session — sessions survive page reloads. ` +
+      `Skip this statement, DROP it first to redefine it, or click New session to start from an empty catalog.`;
+  }
+  div.querySelector("pre").textContent = msg;
+  p.el.querySelector(".body").replaceChildren(div);
+  p.state("failed", "fail");
+}
+
+// ── Running ───────────────────────────────────────────────────────────────────
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function runOne(stmt) {
+  const p = newPanel(stmt);
+  let op;
+  try { op = (await api(`/api/run/${session}`, { sql: stmt })).op; }
+  catch (e) { showError(p, e.message); return false; }
+  current = op;
+  let token = 0;
+  try {
+    while (token !== null) {
+      if (stopRequested) {
+        await api(`/api/cancel/${session}/${op}`, {});
+        p.state(`cancelled · ${p.rows.length} rows`, "fail");
+        return false;
+      }
+      const r = await api(`/api/result/${session}/${op}/${token}`);
+      if (r.jobId && !p.jobId) { p.jobId = r.jobId; paintWaiting(p); }
+      if (r.jobId && !p.el.querySelector(".job a")) {
+        p.el.querySelector(".job").innerHTML =
+          `<a target="_blank" href="http://${location.hostname}:8081/#/job/running/${r.jobId}/overview">Flink job ${r.jobId.slice(0, 8)}</a>`;
+      }
+      if (r.type === "PAYLOAD") {
+        if (r.columns.length) p.columns = r.columns;
+        apply(p, r.rows);
+        render(p);
+        p.state(`running · ${p.rows.length} rows · ${p.changes} changes`, "live");
+      }
+      if (r.type === "EOS" || r.next === null) break;
+      token = r.next;
+      await sleep(r.type === "PAYLOAD" && r.rows.length ? 100 : 500);
+    }
+  } catch (e) { showError(p, e.message); return false; }
+  finally { current = null; }
+  p.state(`done · ${p.rows.length} rows`, "done");
+  render(p);
+  return true;
+}
+
+async function runScript(sql) {
+  if (busy || !session) return;
+  const text = typeof sql === "string" ? sql : editor.somethingSelected() ? editor.getSelection() : editor.getValue();
+  const { statements } = await api("/api/split", { sql: text });
+  if (!statements.length) return;
+  $("results").replaceChildren();
+  stopRequested = false; setBusy(true);
+  const n = statements.length, of = n === 1 ? "" : ` of ${n}`;
+  // Taken before the script runs: the namespace its unqualified DDL names start from.
+  let before = null;
+  if (!$("catalog").hidden && needsCurrent(statements))
+    before = await api(`/api/catalog/${session}/current`).catch(() => null);
+  const succeeded = [];
+  for (const [i, s] of statements.entries()) {
+    resultsBar(n === 1 ? "running…" : `running statement ${i + 1} of ${n}…`);
+    if (!(await runOne(s))) break;
+    succeeded.push(s);
+  }
+  const k = succeeded.length;
+  resultsBar(k === n ? `${n} statement${n === 1 ? "" : "s"} · done`
+                     : stopRequested ? `cancelled at statement ${k + 1}${of}` : `stopped at statement ${k + 1}${of} — it failed`);
+  setBusy(false);
+  // Refresh only the tree levels the successful CREATE / DROP / ALTERs touched.
+  catalogAfterDdl(succeeded, before);
+}
+
+$("run").onclick = () => runScript();
+$("clear").onclick = () => { $("results").replaceChildren(); resultsBar(""); };
+$("newSession").onclick = () => {
+  if (session && !confirm("Start a new session? Everything created in this one (tables, views, catalogs, SET options) is discarded.")) return;
+  openSession();
+};
+$("examples").onchange = e => {
+  const ex = examples[e.target.value];
+  if (ex) { editor.setValue(ex.sql); editor.focus(); }
+  e.target.value = "";
+};
+
+// ── Resizable split between editor and results ───────────────────────────────
+
+const DEFAULT_EDITOR_H = 300, MIN_EDITOR_H = 80, MIN_RESULTS_H = 120;
+function setEditorHeight(h, save) {
+  const main = document.querySelector("main");
+  const room = main.clientHeight - $("splitter").offsetHeight - $("editorPane").offsetTop + main.offsetTop - MIN_RESULTS_H;
+  h = Math.round(Math.max(MIN_EDITOR_H, Math.min(h, Math.max(MIN_EDITOR_H, room))));
+  main.style.setProperty("--editor-h", h + "px");
+  $("splitter").setAttribute("aria-valuenow", h);
+  editor.refresh();
+  if (save) store.set("editorHeight", String(h));
+  return h;
+}
+{
+  const sp = $("splitter");
+  let startY = 0, startH = 0;
+  sp.addEventListener("pointerdown", e => {
+    startY = e.clientY; startH = $("editorPane").offsetHeight;
+    sp.setPointerCapture(e.pointerId); sp.classList.add("dragging"); document.body.classList.add("resizing");
+  });
+  sp.addEventListener("pointermove", e => {
+    if (sp.hasPointerCapture(e.pointerId)) setEditorHeight(startH + e.clientY - startY, false);
+  });
+  const end = e => {
+    if (!sp.hasPointerCapture(e.pointerId)) return;
+    sp.releasePointerCapture(e.pointerId); sp.classList.remove("dragging"); document.body.classList.remove("resizing");
+    setEditorHeight($("editorPane").offsetHeight, true);
+  };
+  sp.addEventListener("pointerup", end);
+  sp.addEventListener("pointercancel", end);
+  sp.addEventListener("dblclick", () => setEditorHeight(DEFAULT_EDITOR_H, true));
+  sp.addEventListener("keydown", e => {
+    const step = e.shiftKey ? 100 : 20, h = $("editorPane").offsetHeight;
+    if (e.key === "ArrowUp") { setEditorHeight(h - step, true); e.preventDefault(); }
+    if (e.key === "ArrowDown") { setEditorHeight(h + step, true); e.preventDefault(); }
+  });
+  window.addEventListener("resize", () => setEditorHeight($("editorPane").offsetHeight, false));
+  setEditorHeight(Number(store.get("editorHeight")) || DEFAULT_EDITOR_H, false);
+}
+
+let examples = [];
+const GROUP_LABELS = {
+  DDL: "DDL — flink_sql/01, 02",
+  Queries: "Queries — flink_sql/06_analytics_and_monitoring.sql",
+  Jobs: "Jobs (INSERT INTO …) — flink_sql/03, 04, 05",
+};
+
+// The catalog browser (catalog.js): names insert at the cursor, DDL runs SHOW CREATE TABLE.
+catalogInit({
+  layout: $("layout"),
+  storeKey: "catalog",
+  insert: t => { editor.replaceSelection(t); editor.focus(); },
+  ddl: path => runScript(`SHOW CREATE TABLE ${qualified(path)};`),
+  foot: "Click a table for its columns; double-click it to insert its name. <b>Info</b> shows its structure; <b>DDL</b> runs <code>SHOW CREATE TABLE</code>.",
+});
+
+Promise.all([api("/api/examples"), api("/api/config")]).then(([list, cfg]) => {
+  examples = list;
+  const groups = {};
+  list.forEach((ex, i) => {
+    if (!groups[ex.group]) {
+      groups[ex.group] = document.createElement("optgroup");
+      groups[ex.group].label = GROUP_LABELS[ex.group] || ex.group;
+      $("examples").appendChild(groups[ex.group]);
+    }
+    groups[ex.group].appendChild(new Option(ex.title, i));
+  });
+  $("ddl").checked = cfg.preloadDdl;
+  resumeOrOpen();
+});
+
+setInterval(async () => {
+  if (!session) return;
+  try { await api(`/api/heartbeat/${session}`, {}); }
+  catch { session = null; store.set("session", null); setBusy(busy); setStatus("session lost — click New session", true); }
+}, 60000);
+</script>
+</body>
+</html>

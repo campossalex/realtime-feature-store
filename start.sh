@@ -26,8 +26,9 @@ start.sh — betting_features_oss scenario bootstrap
                               risk-scoring-kafka and risk-score-log-postgres).
 
   ./start.sh --services-only  Start the containers and install the connector JARs,
-                              then stop. No DDL, no jobs — the commands to run them
-                              by hand are printed at the end.
+                              then stop. No DDL, no jobs — build the pipeline in the
+                              browser (http://localhost:8084/pipeline), or run the
+                              commands printed at the end by hand.
 
   -h, --help                  Show this.
 
@@ -93,6 +94,7 @@ wait_healthy zookeeper 12
 wait_healthy redpanda 20
 wait_healthy postgres 12
 wait_healthy jobmanager 24
+wait_healthy sql-gateway 24
 
 echo ""
 echo "==> All core services healthy."
@@ -204,6 +206,9 @@ fi
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 echo "  Services:"
+echo "    Environment homepage →  http://localhost        (start here; links to everything)"
+echo "    Pipeline Builder    →  http://localhost:8084/pipeline  (the diagram as buttons)"
+echo "    SQL Editor          →  http://localhost:8084   (Flink SQL in the browser)"
 echo "    Flink Web UI        →  http://localhost:8081"
 echo "    Inference service   →  http://localhost:9051"
 echo "    Outliner generator  →  http://localhost:9050"
@@ -218,7 +223,8 @@ echo ""
 if [ "$SERVICES_ONLY" = "1" ]; then
   echo "  ─────────────────────────────────────────────────────────────"
   echo "  NO DDL OR JOBS WERE SUBMITTED (--services-only)."
-  echo "  Run the steps below in order to bring the pipeline up."
+  echo "  Build the pipeline in the browser: http://localhost:8084/pipeline"
+  echo "  — or run the steps below in order."
   echo "  ─────────────────────────────────────────────────────────────"
 else
   echo "  Manual SQL — to re-run a step, or if auto-submission failed:"

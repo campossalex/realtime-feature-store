@@ -1,0 +1,147 @@
+/* The catalog browser and the table structure dialog, shared by the SQL editor and the
+ pipeline page (catalog.js builds their markup). Tree rows are .tnode: the pipeline page
+ already uses .node for its diagram boxes. */
+/* ── Catalog browser ── */
+#catalogToggle { display: inline-flex; align-items: center; gap: 6px; }
+#catalogToggle .icon { width: 16px; height: 16px; flex: none; }
+#catalogToggle[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+#catalog { flex: none; width: 290px; display: flex; flex-direction: column; min-height: 0;
+           background: var(--panel); border-right: 1px solid var(--border); }
+#catalog[hidden] { display: none; }
+.cat-head { display: flex; align-items: center; gap: 4px; padding: 8px 8px 8px 14px;
+            border-bottom: 1px solid var(--border); }
+.cat-head .spacer { flex: 1; }
+.cat-head button { width: 28px; height: 28px; padding: 0; color: var(--muted);
+                   display: inline-flex; align-items: center; justify-content: center; }
+.cat-head button svg { width: 15px; height: 15px; }
+.cat-head button:hover, .cat-head button:focus-visible { color: var(--fg); }
+#catalogTree, #catalogTree ul { list-style: none; margin: 0; padding: 0; }
+#catalogTree { flex: 1; overflow: auto; padding: 6px 0; font-size: 13px; }
+#catalogTree ul { padding-left: 14px; }
+.tnode { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 10px;
+        cursor: pointer; white-space: nowrap; border-radius: 4px; margin: 0 4px; }
+.tnode:hover { background: var(--stmt-bg); }
+/* A node added by a refresh flashes once, so it is clear what the DDL changed. */
+.tnode.fresh { animation: fresh 2s ease-out; }
+@keyframes fresh { from { background: color-mix(in srgb, var(--ok) 32%, transparent); } }
+.tnode:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tnode .caret { flex: none; width: 10px; font-size: 9px; color: var(--muted); transition: transform .12s; }
+li[aria-expanded="true"] > .tnode .caret { transform: rotate(90deg); }
+.tnode .kind { flex: none; font: 600 9.5px/1 var(--mono); letter-spacing: .03em; padding: 3px 4px;
+              border-radius: 3px; color: var(--muted); border: 1px solid var(--border); min-width: 26px;
+              text-align: center; }
+.tnode.catalog .kind { color: var(--kw); border-color: color-mix(in srgb, var(--kw) 40%, transparent); }
+.tnode.database .kind { color: var(--num); border-color: color-mix(in srgb, var(--num) 40%, transparent); }
+.tnode.table .kind { color: var(--type); border-color: color-mix(in srgb, var(--type) 40%, transparent); }
+.tnode .name { overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12.5px; }
+.tnode.column { cursor: default; gap: 8px; padding-left: 26px; }
+.tnode.column .name { color: var(--fg); flex: none; max-width: 60%; }
+.tnode .type { color: var(--type); font-family: var(--mono); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; }
+.tnode .badge { flex: none; font-size: 10px; padding: 0 4px; border-radius: 3px;
+               background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+/* The table actions float over the row's right end instead of joining its layout:
+   shown on hover, they would otherwise make the row taller and push the tree down. */
+.tnode { position: relative; }
+.tnode .actions { position: absolute; right: 4px; top: 0; bottom: 0; display: flex; align-items: center;
+                 gap: 4px; padding-left: 18px; visibility: hidden;
+                 background: linear-gradient(to right, transparent, var(--stmt-bg) 14px); border-radius: 0 4px 4px 0; }
+.tnode:hover .actions, .tnode:focus-within .actions, .tnode.active .actions { visibility: visible; }
+.tnode .actions button { font-size: 11px; line-height: 1.3; padding: 0 6px; color: var(--muted);
+                        background: var(--panel); }
+.tnode .actions button:hover, .tnode .actions button:focus-visible { color: var(--fg); border-color: var(--muted); }
+.cat-msg { padding: 3px 10px 3px 30px; color: var(--muted); font-size: 12px; }
+.cat-msg.err { color: var(--err); white-space: normal; }
+.cat-foot { margin: 0; padding: 8px 14px 10px; border-top: 1px solid var(--border);
+            color: var(--muted); font-size: 11.5px; line-height: 1.4; }
+.cat-foot code { font-size: 11px; }
+/* Narrow screens: the panel floats over the page instead of squeezing it. */
+@media (max-width: 760px) {
+  #catalog { position: absolute; inset: 0 auto 0 0; z-index: 5; width: min(320px, 88vw);
+             box-shadow: 8px 0 32px rgba(0,0,0,.3); }
+}
+/* ── The table structure dialog ── */
+#structure { width: min(920px, calc(100vw - 32px)); max-height: min(86vh, 960px); padding: 0;
+             border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+             color: var(--fg); box-shadow: 0 12px 48px rgba(0,0,0,.35); }
+#structure[open] { display: flex; flex-direction: column; }
+#structure::backdrop { background: rgba(10, 12, 16, .55); }
+#structure header { padding: 8px 12px; gap: 8px; flex-wrap: nowrap; }
+#structure header h2 { font: 600 14px var(--mono); margin: 0; overflow: hidden; text-overflow: ellipsis;
+                       white-space: nowrap; min-width: 0; }
+#structure header .kind { flex: none; font: 600 9.5px/1 var(--mono); padding: 3px 5px; border-radius: 3px;
+                          color: var(--type); border: 1px solid color-mix(in srgb, var(--type) 40%, transparent); }
+#structure .sbody { overflow: auto; padding: 4px 16px 16px; min-height: 0; }
+#structure h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+                margin: 16px 0 6px; font-weight: 600; }
+#structure .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+#structure .chip { font-size: 12px; padding: 3px 8px; border-radius: 999px; background: var(--stmt-bg);
+                   border: 1px solid var(--border); white-space: nowrap; }
+#structure .chip b { font-weight: 600; } #structure .chip code { font-size: 11.5px; }
+#structure .chip.lake { border-color: color-mix(in srgb, var(--ok) 50%, transparent);
+                        background: color-mix(in srgb, var(--ok) 12%, transparent); }
+#structure table { width: 100%; min-width: 0; }
+#structure td, #structure th { white-space: nowrap; }
+#structure td.num { color: var(--muted); width: 1%; text-align: right; }
+#structure td.name { font-weight: 600; }
+#structure td.type { color: var(--type); }
+#structure td.notes { white-space: normal; color: var(--muted); font-family: system-ui, sans-serif; font-size: 12px; }
+#structure td.opt-key { color: var(--str); width: 1%; }
+#structure td.opt-val { white-space: pre-wrap; word-break: break-all; }
+#structure .badge { font-size: 10px; padding: 0 5px; border-radius: 3px; margin-right: 4px;
+                    background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+#structure details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin: 16px 0 6px;
+                             text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+#structure details pre { margin: 0; padding: 10px 12px; background: var(--stmt-bg); border-radius: 6px;
+                         font: 12.5px/1.5 var(--mono); overflow: auto; white-space: pre; }
+#structure .loading { display: flex; gap: 10px; align-items: center; padding: 24px 0; color: var(--muted); }
+#structure .error { background: var(--err-bg); color: var(--err); padding: 10px 12px; font-size: 13px; margin-top: 12px; }
+
+/* ── The Job Catalog tab (pipeline page) ── */
+/* Split panel: the Data Catalog on top, the Job Catalog below, each scrolling on its own. */
+.cat-sec { display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 14px; flex: none;
+           font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+           background: var(--stmt-bg); border-bottom: 1px solid var(--border); }
+.cat-sec.jobs { border-top: 1px solid var(--border); }
+.cat-split:not([hidden]) + .cat-sec.jobs { border-top: 0; }
+.cat-sec .spacer { flex: 1; }
+.cat-sec .cnt { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.cat-sec button { width: 24px; height: 24px; padding: 0; color: var(--muted); display: inline-flex;
+                  align-items: center; justify-content: center; }
+.cat-sec button svg { width: 14px; height: 14px; }
+.cat-sec button:hover, .cat-sec button:focus-visible { color: var(--fg); }
+#catalog.split #catalogTree { flex: 3 1 0; min-height: 60px; }
+#catalog.split .job-list { flex: 2 1 0; min-height: 60px; }
+#catalog.split #catalogTree[hidden], #catalog.split .job-list[hidden] { display: none; }
+/* Section titles collapse their section: the caret turns, the body hides. */
+.cat-sec .sec-toggle { display: inline-flex; align-items: center; gap: 6px; width: auto; height: auto; padding: 2px 4px 2px 0;
+                       border: 0; background: none; font: inherit; letter-spacing: inherit; text-transform: inherit;
+                       color: var(--muted); cursor: pointer; }
+.cat-sec .sec-toggle:hover, .cat-sec .sec-toggle:focus-visible { color: var(--fg); }
+.cat-sec .caret { font-size: 10px; transition: transform .12s; }
+.cat-sec.closed .caret { transform: rotate(-90deg); }
+.cat-sec.closed .cnt { opacity: .8; }
+/* The resize handle between the two parts. */
+.cat-split { flex: none; height: 7px; cursor: row-resize; touch-action: none; display: flex; align-items: center;
+             justify-content: center; outline: none; border-top: 1px solid var(--border); }
+.cat-split::before { content: ""; width: 36px; height: 3px; border-radius: 2px; background: var(--border); }
+.cat-split:hover::before, .cat-split:focus-visible::before, .cat-split.dragging::before { background: var(--accent); }
+.cat-split[hidden] { display: none; }
+.job-list { overflow: auto; padding: 6px 0 8px; }
+.job-list h4 { margin: 10px 14px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.job-list h4 span { font-weight: 500; margin-left: 4px; }
+.job-list ul { list-style: none; margin: 0; padding: 0; }
+.job-list .cat-msg { padding-left: 14px; margin: 2px 0; }
+.job { margin: 0 6px 4px; padding: 7px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel);
+       border-left: 3px solid var(--muted); }
+.job.run { border-left-color: var(--ok); } .job.start { border-left-color: #c79100; } .job.fail { border-left-color: var(--err); }
+.job .jtop { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.job .jstate { flex: none; font: 600 9.5px/1 var(--mono); padding: 3px 5px; border-radius: 3px; text-transform: uppercase;
+               color: var(--muted); border: 1px solid var(--border); }
+.job.run .jstate { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.job.fail .jstate { color: var(--err); border-color: color-mix(in srgb, var(--err) 45%, transparent); }
+.job .jname { font: 600 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.job .jmeta { display: flex; align-items: baseline; gap: 8px; margin-top: 4px; font-size: 11.5px; color: var(--muted); }
+.job .jwhat { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; font-family: var(--mono); font-size: 11px; }
+.job .jdur { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+.job a { flex: none; color: var(--accent); text-decoration: none; font-size: 11.5px; }
+.job a:hover { text-decoration: underline; }

@@ -1,0 +1,73 @@
+/* Shared by the SQL editor (index.html) and the pipeline page (pipeline.html):
+ the colour tokens for both themes, SQL syntax colours, and the waiting spinner. */
+:root {
+  --bg: #f6f7f9; --panel: #fff; --fg: #1d2330; --muted: #667085; --border: #d9dde4;
+  --accent: #e6526f; --accent-fg: #fff; --err-bg: #fdecef; --err: #b42335;
+  --stmt-bg: #eef0f6;
+  --ok: #1f7a4d;
+  /* SQL syntax colours — each at least 4.5:1 against --panel and --stmt-bg. */
+  --kw: #6a2fc2; --str: #a3450b; --num: #155fa6; --type: #0b7068; --com: #5f6879;
+  --qual: #3b5579; --punct: #5c6578;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+/* The dark palette applies when the OS asks for it, unless the theme toggle picked
+   light — and always when the toggle picked dark. The two blocks must stay identical:
+   CSS has no way to share one declaration block between a media query and a selector. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151b; --panel: #1b1f27; --fg: #e3e6ec; --muted: #9098a8; --border: #2e3440;
+    --accent: #f06a84; --accent-fg: #fff; --err-bg: #3a1c22; --err: #ff8a9b;
+    --stmt-bg: #232834;
+    --ok: #5fd39b;
+    --kw: #c9a8ff; --str: #ffb86b; --num: #79c0ff; --type: #56d4bc; --com: #8f98aa;
+    --qual: #a9b8d0; --punct: #a3abbb;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #12151b; --panel: #1b1f27; --fg: #e3e6ec; --muted: #9098a8; --border: #2e3440;
+  --accent: #f06a84; --accent-fg: #fff; --err-bg: #3a1c22; --err: #ff8a9b;
+  --stmt-bg: #232834;
+  --ok: #5fd39b;
+  --kw: #c9a8ff; --str: #ffb86b; --num: #79c0ff; --type: #56d4bc; --com: #8f98aa;
+  --qual: #a9b8d0; --punct: #a3abbb;
+  color-scheme: dark;
+}
+:root[data-theme="light"] { color-scheme: light; }
+
+/* Syntax colours, for the editor and the runMode copies in the result panels. Each
+   rule is doubled with .cm-s-default: codemirror.css styles the editor's tokens with
+   that two-class selector (light-theme colours such as #708 for keywords), which
+   would otherwise outrank these and leave dark mode with dark text on a dark panel. */
+.cm-s-default .cm-keyword, .cm-keyword { color: var(--kw); font-weight: 600; }
+.cm-s-default .cm-string, .cm-string,
+.cm-s-default .cm-string-2, .cm-string-2 { color: var(--str); }
+.cm-s-default .cm-number, .cm-number,
+.cm-s-default .cm-atom, .cm-atom { color: var(--num); }
+.cm-s-default .cm-builtin, .cm-builtin,
+.cm-s-default .cm-type, .cm-type,
+.cm-s-default .cm-variable-3, .cm-variable-3 { color: var(--type); }
+.cm-s-default .cm-comment, .cm-comment { color: var(--com); font-style: italic; }
+.cm-s-default .cm-variable-2, .cm-variable-2,
+.cm-s-default .cm-qualifier, .cm-qualifier { color: var(--qual); }
+.cm-s-default .cm-variable, .cm-variable,
+.cm-s-default .cm-def, .cm-def,
+.cm-s-default .cm-meta, .cm-meta { color: var(--fg); }
+.cm-s-default .cm-operator, .cm-operator,
+.cm-s-default .cm-bracket, .cm-bracket,
+.cm-s-default .cm-punctuation, .cm-punctuation { color: var(--punct); }
+
+/* Shown in a running panel until its first row arrives. It fades in after 0.4 s, so a
+   statement that answers at once (DDL, SET) never flashes it. */
+.waiting { display: flex; align-items: flex-start; gap: 10px; padding: 12px; color: var(--muted);
+           font-size: 13px; animation: fade-in .2s ease .4s both; }
+.waiting.shown { animation: none; }
+.waiting .msg { color: var(--fg); }
+.waiting .elapsed { font-variant-numeric: tabular-nums; margin-left: 6px; }
+.waiting .hint { font-size: 12px; margin-top: 3px; }
+.spinner { flex: none; width: 14px; height: 14px; margin-top: 1px; border-radius: 50%;
+           border: 2px solid var(--border); border-top-color: var(--accent);
+           animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fade-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }

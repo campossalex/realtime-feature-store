@@ -20,6 +20,9 @@ name: betting-features-oss
 #   9051  — Inference service REST API
 #   3000  — Grafana
 #   8082  — Redpanda Console
+#   80    — Environment homepage (start here; links to everything)
+#   8083  — Flink SQL Gateway (REST)
+#   8084  — Web SQL editor (in front of the SQL Gateway); Pipeline Builder at /pipeline
 
 services:
 
@@ -150,8 +153,12 @@ services:
     entrypoint: /bin/sh
     command:
       - -c
-      # chown for the same reason as the jobmanager — see the comment there.
-      - "chown flink:flink /tmp/flink-checkpoints 2>/dev/null || true; cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh taskmanager"
+      # chown for the same reason as the jobmanager — see the comment there. /tmp/fluss
+      # too: Docker creates it root-owned as the parent of the remote-data mount, and a
+      # streaming read of a Fluss primary-key table (SELECT ... FROM
+      # fluss.betting.player_feature_store) stages KV snapshot files in
+      # /tmp/fluss/kv-snapshots-*, which the flink user could not create.
+      - "chown flink:flink /tmp/flink-checkpoints /tmp/fluss 2>/dev/null || true; cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true; /docker-entrypoint.sh taskmanager"
     environment:
       TZ: UTC
       FLINK_PROPERTIES: |
@@ -245,6 +252,104 @@ services:
       - ./fluss-remote-data:/tmp/fluss/remote-data
     networks:
       - flink-net
+
+  # ── Web SQL editor ───────────────────────────────────────────────────────────
+  # The SQL Gateway is the same SQL engine the SQL client embeds, exposed as a REST
+  # API: sessions, statements, paged results. It has no UI and sends no CORS headers,
+  # so the browser talks to sql-editor, which proxies to it.
+  #
+  # Like sql-client, it bypasses /docker-entrypoint.sh, so its config is appended to
+  # config.yaml directly — the same block as sql-client's, for the same reason: the
+  # restart strategy, state backend and idle timeout are baked into the JobGraph by
+  # whoever submits it (see the sql-client comment above). One line is left out:
+  # execution.checkpointing.interval. With checkpointing on, a streaming SELECT only
+  # hands rows to the browser after a checkpoint completes (up to 60s of blank table),
+  # so the editor wraps each job it offers (Jobs examples, Pipeline Builder Deploy) in
+  # SET 'execution.checkpointing.interval' = '60s' ... RESET instead.
+  #
+  # idle-timeout=0 means sessions never expire. Everything a user creates lives in the
+  # session's in-memory catalog, so the 10-minute default would silently drop their
+  # tables over a coffee break.
+
+  sql-gateway:
+    image: apache/flink:1.20
+    hostname: sql-gateway
+    environment:
+      TZ: UTC
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        cp /opt/flink/lib/extra/*.jar /opt/flink/lib/ 2>/dev/null || true
+        grep -q '^execution.target' /opt/flink/conf/config.yaml || \
+          printf '\njobmanager.rpc.address: jobmanager\nrest.address: jobmanager\nrest.port: 8081\nexecution.target: remote\ntable.local-time-zone: UTC\ntable.exec.source.idle-timeout: 5 s\nstate.backend: filesystem\nstate.checkpoints.dir: file:///tmp/flink-checkpoints\nrestart-strategy.type: exponential-delay\nrestart-strategy.exponential-delay.initial-backoff: 10s\nrestart-strategy.exponential-delay.max-backoff: 2min\n' \
+            >> /opt/flink/conf/config.yaml
+        exec /opt/flink/bin/sql-gateway.sh start-foreground \
+          -Dsql-gateway.endpoint.rest.address=0.0.0.0 \
+          -Dsql-gateway.endpoint.rest.port=8083 \
+          -Dsql-gateway.session.idle-timeout=0
+    ports:
+      - "8083:8083"
+    depends_on:
+      jobmanager:
+        condition: service_healthy
+    volumes:
+      - ./lib:/opt/flink/lib/extra:ro
+      - ./fluss-remote-data:/tmp/fluss/remote-data
+    networks:
+      - flink-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/v1/info"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    restart: unless-stopped
+
+  # A one-page editor plus the Pipeline Builder at /pipeline: the architecture diagram as
+  # buttons that create each table, deploy each job and show what runs, read from the
+  # gateway and the JobManager (FLINK_URL). The browser keeps one gateway session and
+  # reconnects to it after a reload, so the DDL a user ran is still there.
+  #
+  # PRELOAD_DDL=true runs 01_sources_and_catalogs.sql into each new session first, like
+  # `sql-client.sh --init`. Off by default; the editor has a checkbox for it.
+  sql-editor:
+    image: python:3.11-slim
+    hostname: sql-editor
+    environment:
+      TZ: UTC
+      GATEWAY_URL: http://sql-gateway:8083
+      FLINK_URL: http://jobmanager:8081
+      PRELOAD_DDL: "${PRELOAD_DDL:-false}"
+    depends_on:
+      sql-gateway:
+        condition: service_healthy
+    volumes:
+      - ./sql-editor:/app:ro
+      - ./flink_sql:/opt/sql:ro
+    working_dir: /app
+    command: >
+      bash -c "pip install -r requirements.txt -q && python3 app.py"
+    ports:
+      - "8084:8084"
+    networks:
+      - flink-net
+    restart: on-failure
+
+  # ── Environment homepage ─────────────────────────────────────────────────────
+  # One static page on port 80 with a card per web UI — each link built from the host
+  # the page was opened on, with a live reachability dot — plus the architecture and the
+  # connection details. Nothing is proxied; every UI keeps its own port.
+  homepage:
+    image: nginx:1.27-alpine
+    hostname: homepage
+    volumes:
+      - ./homepage:/usr/share/nginx/html:ro
+    ports:
+      - "80:80"
+    networks:
+      - flink-net
+    restart: unless-stopped
 
   # ── Redpanda (Kafka-compatible broker) ───────────────────────────────────────
 

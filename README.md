@@ -200,9 +200,11 @@ cd realtime-feature-store
 # 2. Start everything — services, DDL and all 9 streaming jobs
 ./start.sh
 
-#    ...or bring up only the containers and drive the SQL yourself.
-#    Prints every DDL / job command, ready to paste.
+#    ...or bring up only the containers and build the pipeline yourself, in the
+#    browser at http://localhost:8084/pipeline or with the printed commands.
 ./start.sh --services-only
+
+#    Everything is linked from the environment homepage: http://localhost
 
 # 3. Trigger a fraud outliner and watch the risk score flip
 curl -X POST http://localhost:9050/trigger \
@@ -245,6 +247,10 @@ Services and their host ports:
 
 | Service | URL / Port |
 |---------|-----------|
+| **Environment homepage** — start here; links to everything below, with live status | http://localhost |
+| Pipeline Builder (interactive diagram) | http://localhost:8084/pipeline |
+| Web SQL editor | http://localhost:8084 |
+| Flink SQL Gateway (REST, behind the editor) | http://localhost:8083 |
 | Flink Web UI | http://localhost:8081 |
 | Inference API | http://localhost:9051 |
 | Outliner UI | http://localhost:9050 |
@@ -306,6 +312,44 @@ Grafana dashboard queries (11 of its panels hit it), so without them the dashboa
 and nothing reaches PostgreSQL. `start.sh` used to submit `04_` but not `05_`, which is
 exactly that situation.
 
+### Browser interfaces
+
+Three services give the demo a browser front end, the same ones the `streaming-analytics`
+lab uses:
+
+- **`sql-gateway`** (port 8083) — Flink's SQL Gateway: the SQL Client's engine as a REST API.
+  It appends the same `config.yaml` block as `sql-client` (checkpointing, restart strategy,
+  `table.exec.source.idle-timeout`) because those are baked into a job by whoever submits it:
+  without them a job deployed from the browser would run with checkpointing off and never
+  restart. Sessions never expire (`idle-timeout=0`), so tables created in the browser survive
+  a coffee break.
+- **`sql-editor`** (port 8084) — a small Flask app in front of the gateway (which sends no CORS
+  headers), serving two pages that share one gateway session, kept across page reloads:
+  - **http://localhost:8084** — the SQL editor. The examples menu holds every file in
+    `flink_sql/`: the DDL, each job on its own, and each query in `06_`. Tick *preload DDL*
+    (or start with `PRELOAD_DDL=true`) to open sessions with `01_` already run, like
+    `sql-client.sh --init`. The *Catalog* panel browses catalogs and the jobs on the cluster.
+  - **http://localhost:8084/pipeline** — the Pipeline Builder: the architecture diagram as
+    buttons. *Create* runs a table's `CREATE TABLE` (cut from `01_`/`02_`), *Deploy* runs one
+    job's `INSERT` (cut from `03_`–`05_` at its `SET 'pipeline.name'`), *View data* queries the
+    table, and the boxes turn green as jobs run and tables return rows. A *Guide* mode walks
+    through the pipeline step by step. Every pop-up shows its SQL, editable before it runs.
+- **`homepage`** (port 80) — a static page linking every UI with a reachability dot, the
+  architecture, and the connection details.
+
+Things worth knowing:
+
+- Job boxes are matched to Flink jobs by `pipeline.name`, so jobs submitted by `start.sh`
+  light up too. On page load the builder also creates, in the browser's session, the tables a
+  running job uses — a full `./start.sh` creates them only in its own SQL Client sessions.
+- The `fluss` catalog and the Kafka/CDC tables are session-scoped (Flink's in-memory default
+  catalog); the feature store table itself lives in Fluss and outlives every session.
+- *View data* on a CDC table reads through a replication slot of its own
+  (`flink_view_*_slot`, dropped when the query stops), because PostgreSQL allows one reader
+  per slot and Job A holds the pre-created ones.
+- The gateway is one more JVM (~1 GB). Each streaming *View data* holds a task slot until
+  its pop-up is closed.
+
 ### `--services-only`
 
 ```bash
@@ -314,7 +358,7 @@ exactly that situation.
 
 Starts every container and installs the connector JARs, then stops — no DDL, no jobs. The
 Fluss database is left empty. Use it when you want to run the SQL by hand, demo the steps
-live, or submit a subset. The exact commands for each step are printed at the end, and the
+live in the [Pipeline Builder](#browser-interfaces), or submit a subset. The exact commands for each step are printed at the end, and the
 same list is printed on a normal run so you can re-run any single step.
 
 Expect rows in `risk_score_log` to appear slowly at first. The lookup join is point-in-time

@@ -1,0 +1,680 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Betting Feature Store</title>
+<script>
+  // Before the stylesheet, so a saved theme applies on first paint.
+  try {
+    const t = localStorage.getItem("home.theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch {}
+</script>
+<style>
+  /* Same tokens as the other lab homepages, so the environments read as one family. */
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --fg: #1d2330; --muted: #667085; --border: #d9dde4;
+    --accent: #e6526f; --accent-fg: #fff; --err: #b42335; --ok: #1f7a4d; --tint: #eef0f6;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151b; --panel: #1b1f27; --fg: #e3e6ec; --muted: #9098a8; --border: #2e3440;
+      --accent: #f06a84; --accent-fg: #fff; --err: #ff8a9b; --ok: #5fd39b; --tint: #232834;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12151b; --panel: #1b1f27; --fg: #e3e6ec; --muted: #9098a8; --border: #2e3440;
+    --accent: #f06a84; --accent-fg: #fff; --err: #ff8a9b; --ok: #5fd39b; --tint: #232834;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 24px;
+           border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 16px; margin: 0; }
+  header .spacer { flex: 1; }
+  #theme { width: 32px; height: 32px; padding: 0; font-size: 16px; line-height: 1; cursor: pointer;
+           border-radius: 6px; border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
+  main { max-width: 1120px; margin: 0 auto; padding: 32px 24px 48px; }
+
+  .intro h2 { font-size: 28px; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+  .intro p { margin: 0; color: var(--muted); max-width: 70ch; }
+  /* The architecture diagram. Page CSS styles the inline SVG through classes, so it
+     follows the theme tokens; only the model call wears the accent. */
+  .arch { margin: 20px 0 0; padding: 16px 16px 10px; background: var(--panel);
+          border: 1px solid var(--border); border-radius: 8px; }
+  .arch .scroll { overflow-x: auto; }
+  .arch svg { display: block; width: 100%; min-width: 760px; height: auto; color: var(--muted);
+              font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .arch .box { fill: var(--bg); stroke: var(--border); stroke-width: 1.5; }
+  .arch .region { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 5 4; }
+  .arch .title { fill: var(--fg); font-size: 13px; font-weight: 600; }
+  .arch .sub { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .arch .region-label { fill: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; }
+  .arch .edge { fill: none; stroke: var(--muted); stroke-width: 1.5; }
+  .arch .edge-label { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .arch .hot { stroke: var(--accent); stroke-width: 2; }
+  .arch .hot-box { stroke: var(--accent); stroke-width: 2; }
+  .arch .hot-label { fill: var(--accent); }
+  .arch .head { fill: var(--muted); }
+  .arch .head-hot { fill: var(--accent); }
+  /* Table boxes are clickable: an (i) badge in the corner, and the whole box as the hit
+     target. The hit rect is transparent but painted, so it receives the pointer. */
+  .arch .tbl { cursor: pointer; outline: none; }
+  .arch .tbl .hit { fill: transparent; stroke: transparent; stroke-width: 2; }
+  .arch .tbl:hover .hit, .arch .tbl:focus-visible .hit { stroke: var(--accent); }
+  .arch .badge circle { fill: var(--panel); stroke: var(--muted); stroke-width: 1.4; }
+  .arch .badge text { fill: var(--fg); font: italic 700 11px Georgia, serif; }
+  .arch .tbl:hover .badge circle, .arch .tbl:focus-visible .badge circle { stroke: var(--accent); fill: var(--accent); }
+  .arch .tbl:hover .badge text, .arch .tbl:focus-visible .badge text { fill: var(--accent-fg); }
+  .arch figcaption { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  .arch figcaption b { color: var(--fg); font-weight: 600; }
+
+  .start { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin: 24px 0 8px;
+           padding: 18px 20px; border-radius: 8px; background: var(--panel);
+           border: 1px solid var(--border); border-left: 3px solid var(--accent); }
+  .start div { flex: 1 1 320px; }
+  .start strong { display: block; font-size: 17px; }
+  .start span { color: var(--muted); font-size: 14px; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 9px 16px; border-radius: 6px;
+         background: var(--accent); color: var(--accent-fg); text-decoration: none; font-weight: 600; }
+  .btn:hover { filter: brightness(1.06); }
+  .btn:focus-visible, .card a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  section { margin-top: 32px; }
+  section > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+                 margin: 0 0 10px; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .card { position: relative; display: flex; flex-direction: column; gap: 6px; padding: 14px 16px;
+          background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .card:hover { border-color: var(--muted); }
+  .card .top { display: flex; align-items: center; gap: 8px; }
+  .card a { color: var(--fg); font-weight: 600; text-decoration: none; }
+  /* The whole card is the link's hit target. */
+  .card a::after { content: ""; position: absolute; inset: 0; border-radius: 8px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14px; }
+  .card .meta { margin-top: auto; padding-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 12px;
+                font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .lab { font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--tint);
+         color: var(--muted); white-space: nowrap; margin-left: auto; }
+
+  /* Reachability: a dot plus a word, so it never relies on colour alone. */
+  .status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  .status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  .status.up::before { background: var(--ok); }
+  .status.down::before { background: var(--err); }
+
+  /* The lab list. */
+  ol.labs { list-style: none; counter-reset: lab 0; margin: 0; padding: 0; display: grid; gap: 8px; }
+  ol.labs li { counter-increment: lab; position: relative; padding: 12px 16px 12px 72px;
+               background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  ol.labs li::before { content: "Step " counter(lab); position: absolute; left: 14px; top: 15px;
+                       font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  ol.labs b { display: block; font-size: 15px; }
+  ol.labs span { color: var(--muted); font-size: 14px; }
+  ol.labs code { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; overflow: hidden; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  th { font-weight: 600; color: var(--muted); font-size: 13px; background: var(--tint); }
+  td code { font-family: var(--mono); font-size: 13px; }
+  .scroll { overflow-x: auto; }
+  /* The table-structure panel. */
+  #tinfo { width: min(760px, calc(100vw - 32px)); max-height: min(86vh, 900px); padding: 0;
+           border: 1px solid var(--border); border-radius: 10px; background: var(--panel); color: var(--fg);
+           box-shadow: 0 12px 48px rgba(0,0,0,.35); }
+  #tinfo[open] { display: flex; flex-direction: column; }
+  #tinfo::backdrop { background: rgba(10, 12, 16, .55); }
+  #tinfo .hd { display: flex; align-items: flex-start; gap: 12px; padding: 14px 18px 12px;
+               border-bottom: 1px solid var(--border); }
+  #tinfo .hd div { flex: 1; min-width: 0; }
+  #tinfo h2 { margin: 0; font-size: 17px; font-family: var(--mono); word-break: break-all; }
+  #tinfo .kind { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--muted); }
+  #tinfo .close { flex: none; width: 30px; height: 30px; padding: 0; border-radius: 6px; cursor: pointer;
+                  border: 1px solid var(--border); background: var(--panel); color: var(--fg); font-size: 14px; }
+  #tinfo .bd { overflow: auto; padding: 14px 18px 18px; }
+  #tinfo .bd > p { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
+  #tinfo h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+              margin: 16px 0 6px; font-weight: 600; }
+  #tinfo table { font-size: 13px; }
+  #tinfo td:first-child, #tinfo td:nth-child(2) { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
+  #tinfo dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font-size: 14px; }
+  #tinfo dt { color: var(--muted); }
+  #tinfo dd { margin: 0; }
+  #tinfo code { font-family: var(--mono); font-size: 12.5px; }
+  #tinfo pre { margin: 0; padding: 10px 12px; background: var(--tint); border-radius: 6px; overflow: auto;
+               font-family: var(--mono); font-size: 12.5px; line-height: 1.5; }
+  #tinfo .qhd { display: flex; align-items: center; justify-content: space-between; }
+  #tinfo .copy { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 6px; cursor: pointer;
+                 border: 1px solid var(--border); background: var(--panel); color: var(--muted); }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+  footer code { font-family: var(--mono); }
+  @media (max-width: 600px) { header, main { padding-left: 16px; padding-right: 16px; } .intro h2 { font-size: 23px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Betting Feature Store</h1>
+  <span class="spacer"></span>
+  <button id="theme" type="button"></button>
+</header>
+
+<main>
+  <div class="intro">
+    <h2>Apache Flink + Apache Fluss · a real-time feature store</h2>
+    <p>A sports-betting platform that is already trading: bets, settlements and logins stream into
+       Kafka, players and wallets change in PostgreSQL. Seven Flink SQL jobs turn them into one
+       feature row per player in a Fluss primary-key table, and every new bet looks that row up
+       the moment it arrives, is scored by risk rules, and alerts land in PostgreSQL and Grafana.</p>
+    <figure class="arch">
+      <div class="scroll">
+      <svg viewBox="0 0 1100 650" role="img"
+           aria-label="Architecture: baseline-gen and the outlier generator publish bets, settlements and logins to Redpanda and keep players and wallets current in PostgreSQL. Seven Flink feature jobs read those streams, two through postgres-cdc, and each upserts only its own columns into one Fluss primary-key table, fluss.betting.player_feature_store. The risk-scoring job looks every bet up in that table FOR SYSTEM_TIME AS OF its processing time and writes the result to the risk_scores topic; a second job copies the alerts to PostgreSQL risk_score_log, which Grafana reads. The inference service reads the same Fluss table with pyfluss.">
+        <defs>
+          <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="head" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+          <marker id="head-hot" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="head-hot" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+        </defs>
+
+        <!-- Generators -->
+        <text class="region-label" x="140" y="30">GENERATORS</text>
+        <rect class="box" x="140" y="40" width="240" height="56" rx="6"/>
+        <text class="title" x="260" y="65" text-anchor="middle">baseline-gen</text>
+        <text class="sub" x="260" y="81" text-anchor="middle">~1,000 players · steady traffic</text>
+
+        <rect class="box" x="620" y="40" width="240" height="56" rx="6"/>
+        <text class="title" x="740" y="65" text-anchor="middle">outlier generator · :9050</text>
+        <text class="sub" x="740" y="81" text-anchor="middle">BOT_001, GEO_001 … on demand</text>
+
+        <line class="edge" x1="260" y1="96" x2="260" y2="160" marker-end="url(#head)"/>
+        <line class="edge" x1="740" y1="96" x2="740" y2="160" marker-end="url(#head)"/>
+
+        <!-- Sources -->
+        <rect class="region" x="40" y="130" width="1020" height="95" rx="10"/>
+        <text class="region-label" x="56" y="148">REDPANDA · KAFKA TOPICS</text>
+        <text class="region-label" x="716" y="148">POSTGRESQL · betting — CDC</text>
+        <rect class="box" x="60" y="162" width="180" height="48" rx="6"/>
+        <text class="title" x="150" y="183" text-anchor="middle">bets</text>
+        <text class="sub" x="150" y="199" text-anchor="middle">latest-offset</text>
+
+        <rect class="box" x="260" y="162" width="180" height="48" rx="6"/>
+        <text class="title" x="350" y="183" text-anchor="middle">bet_settlements</text>
+        <text class="sub" x="350" y="199" text-anchor="middle">win · loss · void</text>
+
+        <rect class="box" x="460" y="162" width="180" height="48" rx="6"/>
+        <text class="title" x="550" y="183" text-anchor="middle">login_events</text>
+        <text class="sub" x="550" y="199" text-anchor="middle">country per login</text>
+
+        <rect class="box" x="700" y="162" width="340" height="48" rx="6"/>
+        <text class="title" x="870" y="183" text-anchor="middle">players · player_wallets</text>
+        <text class="sub" x="870" y="199" text-anchor="middle">postgres-cdc → players_cdc, player_wallets_cdc</text>
+
+        <line class="edge" x1="150" y1="210" x2="150" y2="276" marker-end="url(#head)"/>
+        <line class="edge" x1="350" y1="210" x2="350" y2="276" marker-end="url(#head)"/>
+        <line class="edge" x1="550" y1="210" x2="550" y2="276" marker-end="url(#head)"/>
+        <line class="edge" x1="870" y1="210" x2="870" y2="276" marker-end="url(#head)"/>
+
+        <!-- Flink feature jobs -->
+        <rect class="region" x="40" y="246" width="1020" height="102" rx="10"/>
+        <text class="region-label" x="56" y="264">FLINK 1.20 · SEVEN FEATURE JOBS</text>
+        <rect class="box" x="60" y="278" width="980" height="52" rx="6"/>
+        <text class="title" x="550" y="301" text-anchor="middle">A · B1 · B2 · B3 · C1 · C2 · D</text>
+        <text class="sub" x="550" y="317" text-anchor="middle">CDC join · HOP windows with zero-fill · MATCH_RECOGNIZE — each writes only its own columns</text>
+
+        <line class="edge" x1="550" y1="330" x2="550" y2="384" marker-end="url(#head)"/>
+        <text class="edge-label" x="560" y="362">partial-column upserts</text>
+
+        <!-- Fluss -->
+        <rect class="region" x="40" y="368" width="1020" height="80" rx="10"/>
+        <text class="region-label" x="56" y="386">APACHE FLUSS · ONLINE FEATURE STORE</text>
+        <rect class="box hot-box" x="330" y="386" width="440" height="48" rx="6"/>
+        <text class="title" x="550" y="407" text-anchor="middle">fluss.betting.player_feature_store</text>
+        <text class="sub" x="550" y="423" text-anchor="middle">PK player_id · one row per player</text>
+
+        <rect class="box" x="840" y="386" width="200" height="48" rx="6"/>
+        <text class="title" x="940" y="407" text-anchor="middle">Inference service · :9051</text>
+        <text class="sub" x="940" y="423" text-anchor="middle">POST /score</text>
+
+        <line class="edge hot" x1="772" y1="410" x2="838" y2="410" marker-end="url(#head-hot)"/>
+        <text class="edge-label hot-label" x="805" y="402" text-anchor="middle">pyfluss</text>
+
+        <!-- Scoring -->
+        <polyline class="edge hot" points="440,434 440,470 180,470 180,494" marker-end="url(#head-hot)"/>
+        <text class="edge-label hot-label" x="196" y="464">lookup FOR SYSTEM_TIME AS OF proc_time</text>
+        <polyline class="edge" points="80,210 80,240 30,240 30,520 58,520" marker-end="url(#head)"/>
+        <rect class="box" x="60" y="496" width="240" height="52" rx="6"/>
+        <text class="title" x="180" y="519" text-anchor="middle">risk-scoring-kafka</text>
+        <text class="sub" x="180" y="535" text-anchor="middle">bets ⋈ features · rules</text>
+
+        <line class="edge" x1="300" y1="522" x2="338" y2="522" marker-end="url(#head)"/>
+        <rect class="box" x="340" y="496" width="200" height="52" rx="6"/>
+        <text class="title" x="440" y="519" text-anchor="middle">risk_scores</text>
+        <text class="sub" x="440" y="535" text-anchor="middle">Kafka topic · every bet</text>
+
+        <line class="edge" x1="540" y1="522" x2="578" y2="522" marker-end="url(#head)"/>
+        <rect class="box" x="580" y="496" width="220" height="52" rx="6"/>
+        <text class="title" x="690" y="519" text-anchor="middle">risk-score-log-postgres</text>
+        <text class="sub" x="690" y="535" text-anchor="middle">alerts only</text>
+
+        <line class="edge" x1="800" y1="522" x2="838" y2="522" marker-end="url(#head)"/>
+        <rect class="box" x="840" y="496" width="200" height="52" rx="6"/>
+        <text class="title" x="940" y="519" text-anchor="middle">risk_score_log</text>
+        <text class="sub" x="940" y="535" text-anchor="middle">PostgreSQL · betting</text>
+
+        <line class="edge" x1="940" y1="548" x2="940" y2="582" marker-end="url(#head)"/>
+        <rect class="box" x="860" y="584" width="160" height="48" rx="6"/>
+        <text class="title" x="940" y="605" text-anchor="middle">Grafana</text>
+        <text class="sub" x="940" y="621" text-anchor="middle">risk pipeline dashboard</text>
+
+
+        <!-- Clickable tables: the (i) badge and the whole box open the structure panel -->
+        <g class="tbl" data-table="bets" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the bets table">
+          <rect class="hit" x="60" y="162" width="180" height="48" rx="6"/>
+          <g class="badge"><circle cx="229" cy="173" r="8"/><text x="229" y="176.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="bet_settlements" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the bet_settlements table">
+          <rect class="hit" x="260" y="162" width="180" height="48" rx="6"/>
+          <g class="badge"><circle cx="429" cy="173" r="8"/><text x="429" y="176.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="login_events" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the login_events table">
+          <rect class="hit" x="460" y="162" width="180" height="48" rx="6"/>
+          <g class="badge"><circle cx="629" cy="173" r="8"/><text x="629" y="176.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="players_cdc" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the players_cdc and player_wallets_cdc table">
+          <rect class="hit" x="700" y="162" width="340" height="48" rx="6"/>
+          <g class="badge"><circle cx="1029" cy="173" r="8"/><text x="1029" y="176.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="player_feature_store" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the player_feature_store table">
+          <rect class="hit" x="330" y="386" width="440" height="48" rx="6"/>
+          <g class="badge"><circle cx="759" cy="397" r="8"/><text x="759" y="400.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="risk_scores" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the risk_scores table">
+          <rect class="hit" x="340" y="496" width="200" height="52" rx="6"/>
+          <g class="badge"><circle cx="529" cy="507" r="8"/><text x="529" y="510.5" text-anchor="middle">i</text></g>
+        </g>
+        <g class="tbl" data-table="risk_score_log" tabindex="0" role="button" aria-haspopup="dialog" aria-label="Show the structure of the risk_score_log table">
+          <rect class="hit" x="840" y="496" width="200" height="52" rx="6"/>
+          <g class="badge"><circle cx="1029" cy="507" r="8"/><text x="1029" y="510.5" text-anchor="middle">i</text></g>
+        </g>
+      </svg>
+      </div>
+      <figcaption>
+        <b>Fluss is the only store.</b> Seven jobs write the same row, each only its own columns,
+        and two readers use it live: the scoring job looks it up from inside Flink, and the inference
+        service reads it from Python. Fire an outlier from the generator and the player's next bet
+        scores as an alert within seconds. Click a table's ⓘ for its columns and a query to try.
+      </figcaption>
+    </figure>
+  </div>
+
+  <div class="start">
+    <div>
+      <strong>Start here: the Pipeline Builder</strong>
+      <span>The architecture as buttons — create each table, deploy each job, watch the boxes go live. Or write the SQL yourself in the editor; both share one session that survives a reload.</span>
+    </div>
+    <a class="btn" data-port="8084" data-path="/pipeline" href="#">Interactive pipeline →</a>
+    <a class="btn" data-port="8084" data-path="/" href="#">Open the SQL editor →</a>
+  </div>
+
+  <section>
+    <h3>The steps</h3>
+    <ol class="labs">
+      <li><b>Declare the sources</b>
+          <span>The <code>fluss</code> catalog, two <code>postgres-cdc</code> tables and the Kafka topics. <code>flink_sql/01_sources_and_catalogs.sql</code></span></li>
+      <li><b>Create the online feature store</b>
+          <span>One Fluss primary-key table, one row per player. <code>flink_sql/02_fluss_feature_store.sql</code></span></li>
+      <li><b>Fill it</b>
+          <span>Job A streams the dimensions from PostgreSQL; B1–D compute windowed and pattern features, each into its own columns. <code>flink_sql/03_cdc_dimensions.sql</code>, <code>flink_sql/04_feature_calculations.sql</code></span></li>
+      <li><b>Score every bet</b>
+          <span>A lookup join <code>FOR SYSTEM_TIME AS OF proc_time</code> into Fluss, rules, the <code>risk_scores</code> topic, then the alerts to PostgreSQL. <code>flink_sql/05_risk_scoring_inference.sql</code></span></li>
+      <li><b>Fire an outlier and look</b>
+          <span>The outlier generator, the inference API, Grafana, and the ad hoc queries. <code>flink_sql/06_analytics_and_monitoring.sql</code></span></li>
+    </ol>
+  </section>
+
+  <section>
+    <h3>Build and run</h3>
+    <div class="grid">
+      <div class="card" data-port="8084">
+        <div class="top"><a data-port="8084" data-path="/pipeline" href="#">Pipeline Builder</a><span class="lab">Steps 1–4</span></div>
+        <p>The architecture diagram as buttons: create each table, deploy each job, watch the boxes go live. Optional guided mode.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="8084">
+        <div class="top"><a data-port="8084" data-path="/" href="#">SQL Editor</a><span class="lab">Steps 1–5</span></div>
+        <p>Run Flink SQL against the SQL Gateway, with every file in <code>flink_sql/</code> in the examples menu. Streaming results stay live until you cancel them.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="8081">
+        <div class="top"><a data-port="8081" data-path="/" href="#">Flink Web UI</a><span class="lab">Steps 3–4</span></div>
+        <p>Running jobs, their plans, checkpoints and back pressure. Stop a job here.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="3000">
+        <div class="top"><a data-port="3000" data-path="/d/betting-features-v1" href="#">Grafana</a><span class="lab">Step 5</span></div>
+        <p>The real-time risk pipeline dashboard, reading <code>risk_score_log</code>. No login.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="9050">
+        <div class="top"><a data-port="9050" data-path="/" href="#">Outlier generator</a><span class="lab">Step 5</span></div>
+        <p>Buttons that publish a burst for one suspicious player — a bot, a geo-hopper, a loss streak — with a live log.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="9051">
+        <div class="top"><a data-port="9051" data-path="/" href="#">Inference service</a><span class="lab">Step 5</span></div>
+        <p><code>POST /score</code> and <code>GET /features/&lt;player_id&gt;</code>: the feature store served to Python with pyfluss.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h3>Look underneath</h3>
+    <div class="grid">
+      <div class="card" data-port="8082">
+        <div class="top"><a data-port="8082" data-path="/topics" href="#">Redpanda Console</a><span class="lab">Kafka</span></div>
+        <p>The raw events in <code>bets</code>, <code>bet_settlements</code>, <code>login_events</code> and <code>risk_scores</code>, and the consumer groups the jobs create.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+      <div class="card" data-port="8083">
+        <div class="top"><a data-port="8083" data-path="/v1/info" href="#">Flink SQL Gateway</a><span class="lab">REST</span></div>
+        <p>The engine behind the SQL editor, exposed as a REST API. No UI — this link returns its version.</p>
+        <div class="meta"><span class="status">checking</span><span class="addr"></span></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h3>Connection details</h3>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Endpoint</th><th>From your machine</th><th>Inside the Docker network</th><th>Credentials</th></tr></thead>
+        <tbody>
+          <tr><td>Kafka (Redpanda)</td><td><code class="host" data-port="19092"></code></td><td><code>redpanda:9092</code></td><td>none</td></tr>
+          <tr><td>Fluss coordinator</td><td><code class="host" data-port="9123"></code></td><td><code>coordinator-server:9123</code></td><td>none</td></tr>
+          <tr><td>PostgreSQL</td><td><code class="host" data-port="5432" data-scheme="jdbc:postgresql://" data-suffix="/betting"></code></td><td><code>postgres:5432</code></td><td><code>root</code> / <code>admin1</code>; db <code>betting</code></td></tr>
+          <tr><td>Flink SQL Gateway</td><td><code class="host" data-port="8083" data-scheme="http://"></code></td><td><code>http://sql-gateway:8083</code></td><td>none</td></tr>
+          <tr><td>Flink REST / Web UI</td><td><code class="host" data-port="8081" data-scheme="http://"></code></td><td><code>http://jobmanager:8081</code></td><td>none</td></tr>
+          <tr><td>Inference API</td><td><code class="host" data-port="9051" data-scheme="http://"></code></td><td><code>http://inference:9051</code></td><td>none</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <dialog id="tinfo" aria-labelledby="tinfoTitle">
+    <div class="hd">
+      <div><h2 id="tinfoTitle"></h2><span class="kind" id="tinfoKind"></span></div>
+      <button type="button" class="close" id="tinfoClose" aria-label="Close">✕</button>
+    </div>
+    <div class="bd" id="tinfoBody"></div>
+  </dialog>
+
+  <footer>
+    The walkthrough is <code>README.md</code>; the SQL is in <code>flink_sql/</code>. Status dots
+    check every 15 seconds whether each web UI answers.
+  </footer>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const host = location.hostname || "localhost";
+const url = (port, path = "/") => `http://${host}:${port}${path}`;
+
+// Every link and address is built from the host this page was opened on, so the same
+// page works on localhost and on a remote lab VM.
+document.querySelectorAll("a[data-port]").forEach(a => {
+  a.href = url(a.dataset.port, a.dataset.path);
+  a.target = "_blank"; a.rel = "noopener";
+});
+document.querySelectorAll(".card[data-port]").forEach(c => {
+  c.querySelector(".addr").textContent = `${host}:${c.dataset.port}`;
+});
+document.querySelectorAll("code.host").forEach(c => {
+  const { port, suffix = "", scheme = "" } = c.dataset;
+  c.textContent = `${scheme}${host}:${port}${suffix}`;
+});
+
+// Reachability. The UIs are on other origins and send no CORS headers, so the response
+// is opaque — but an opaque answer still proves the port is serving, while a refused
+// connection or a timeout rejects the fetch.
+async function probe(card) {
+  const s = card.querySelector(".status");
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 4000);
+  try {
+    await fetch(url(card.dataset.port), { mode: "no-cors", cache: "no-store", signal: ctl.signal });
+    s.className = "status up"; s.textContent = "up";
+  } catch {
+    s.className = "status down"; s.textContent = "not reachable";
+  } finally { clearTimeout(timer); }
+}
+const probeAll = () => document.querySelectorAll(".card[data-port]").forEach(probe);
+probeAll();
+setInterval(probeAll, 15000);
+
+// ── Table structure panels ────────────────────────────────────────────────────
+// Kept in step with the schemas by hand: flink_sql/01_sources_and_catalogs.sql and
+// 02_fluss_feature_store.sql. Columns are [name, type, note]; a fourth truthy element
+// marks a primary-key column.
+const TABLES = {
+  bets: {
+    name: "bets", kind: "Flink table · kafka connector · topic bets · JSON",
+    about: "One row per bet placed, from baseline-gen and the outlier generator. It exists only inside your Flink session — a definition over the topic, not a copy of it.",
+    cols: [
+      ["bet_id", "STRING", ""],
+      ["player_id", "STRING", "joins the feature store"],
+      ["amount", "DECIMAL(12,2)", "the stake"],
+      ["bet_type", "STRING", "single · accumulator · live"],
+      ["sport", "STRING", ""],
+      ["odds", "DOUBLE", ""],
+      ["event_time", "STRING", "yyyy-MM-dd HH:mm:ss.SSS, UTC"],
+      ["event_ts", "TIMESTAMP(3)", "computed: event time"],
+      ["proc_time", "TIMESTAMP_LTZ(3)", "computed: PROCTIME(), for the lookup join"],
+    ],
+    facts: [
+      ["Watermark", "<code>event_ts - INTERVAL '2' SECOND</code>"],
+      ["Starts from", "<code>latest-offset</code>: only bets placed from now on"],
+      ["Read by", "B1, B2, B3 and <code>risk-scoring-kafka</code>"],
+    ],
+    query: "SELECT player_id, bet_type, sport, amount, odds, event_ts\nFROM bets;",
+  },
+  bet_settlements: {
+    name: "bet_settlements", kind: "Flink table · kafka connector · topic bet_settlements · JSON",
+    about: "One row per settled bet: whether it won, lost or was voided, and what it paid out.",
+    cols: [
+      ["settlement_id", "STRING", ""],
+      ["bet_id", "STRING", ""],
+      ["player_id", "STRING", ""],
+      ["outcome", "STRING", "win · loss · void"],
+      ["stake", "DECIMAL(12,2)", ""],
+      ["payout_amount", "DECIMAL(12,2)", ""],
+      ["event_time", "STRING", ""],
+      ["event_ts", "TIMESTAMP(3)", "computed: event time"],
+      ["proc_time", "TIMESTAMP_LTZ(3)", "computed"],
+    ],
+    facts: [
+      ["Watermark", "<code>event_ts - INTERVAL '5' SECOND</code>"],
+      ["Starts from", "<code>earliest-offset</code>"],
+      ["Read by", "C1 (net P&amp;L) and C2 (loss streak, <code>MATCH_RECOGNIZE</code>)"],
+    ],
+    query: "SELECT player_id, outcome, stake, payout_amount, event_ts\nFROM bet_settlements;",
+  },
+  login_events: {
+    name: "login_events", kind: "Flink table · kafka connector · topic login_events · JSON",
+    about: "One row per login, with the country it came from. Logins are rare, so one quiet Kafka partition would hold back every window: 01 sets table.exec.source.idle-timeout to 5 s for that.",
+    cols: [
+      ["event_id", "STRING", ""],
+      ["player_id", "STRING", ""],
+      ["session_id", "STRING", ""],
+      ["device_type", "STRING", ""],
+      ["ip_address", "STRING", ""],
+      ["country", "STRING", "what job D counts"],
+      ["event_time", "STRING", ""],
+      ["event_ts", "TIMESTAMP(3)", "computed: event time"],
+      ["proc_time", "TIMESTAMP_LTZ(3)", "computed"],
+    ],
+    facts: [
+      ["Watermark", "<code>event_ts - INTERVAL '2' SECOND</code>"],
+      ["Read by", "D (geo mismatches)"],
+    ],
+    query: "SELECT player_id, country, device_type, event_ts\nFROM login_events;",
+  },
+  players_cdc: {
+    name: "players_cdc · player_wallets_cdc", kind: "Flink tables · postgres-cdc connector · PostgreSQL betting.players, betting.player_wallets",
+    about: "The player dimensions, read once as a snapshot and then followed through PostgreSQL's logical-replication stream. Job A joins them and writes kyc_tier, balance and lifetime_deposits into the feature store.",
+    cols: [
+      ["player_id", "STRING", "both tables", true],
+      ["username", "STRING", "players"],
+      ["kyc_tier", "STRING", "players · BASIC, STANDARD, ENHANCED"],
+      ["registration_date", "DATE", "players"],
+      ["country", "STRING", "players"],
+      ["balance", "DECIMAL(14,2)", "player_wallets"],
+      ["lifetime_deposits", "DECIMAL(14,2)", "player_wallets"],
+      ["lifetime_withdrawals", "DECIMAL(14,2)", "player_wallets"],
+    ],
+    facts: [
+      ["Replication slot", "one reader per slot: job A uses <code>flink_cdc_players_slot</code> and <code>flink_cdc_wallets_slot</code>. A query next to it needs its own, e.g. <code>/*+ OPTIONS('slot.name' = 'my_view') */</code>"],
+      ["Change it", "<code>docker compose exec postgres psql -U root -d betting</code>, then an <code>UPDATE player_wallets …</code>"],
+    ],
+    query: "SELECT * FROM player_wallets_cdc\n  /*+ OPTIONS('slot.name' = 'flink_view_wallets_slot', 'debezium.slot.drop.on.stop' = 'true') */;",
+  },
+  player_feature_store: {
+    name: "fluss.betting.player_feature_store", kind: "Fluss primary-key table · the online feature store",
+    about: "One row per player, every feature a column. Seven Flink jobs write it, each only its own columns — Fluss merges partial-column upserts into the row. It lives in Fluss, so it outlives every Flink session; the fluss catalog that reaches it does not.",
+    cols: [
+      ["player_id", "STRING", "", true],
+      ["bets_last_10min", "BIGINT", "B1 · > 8 = bot"],
+      ["total_stake_30min", "DECIMAL(14,2)", "B3 · > 500 = stake limit"],
+      ["distinct_sports_30min", "BIGINT", "B3 · ≥ 4 = chasing"],
+      ["current_loss_streak", "BIGINT", "C2 · ≥ 6 = RG alert"],
+      ["live_bet_ratio_15min", "DOUBLE", "B2 · > 0.5 = impulsive"],
+      ["avg_odds_15min", "DOUBLE", "B2 · sharp bettor"],
+      ["geo_mismatches_15min", "BIGINT", "D · > 1 = two countries"],
+      ["net_pnl_30min", "DECIMAL(14,2)", "C1"],
+      ["kyc_tier", "STRING", "A, from CDC"],
+      ["balance", "DECIMAL(14,2)", "A, from CDC"],
+      ["lifetime_deposits", "DECIMAL(14,2)", "A, from CDC"],
+      ["last_updated_at", "TIMESTAMP(3)", "every writer"],
+    ],
+    facts: [
+      ["Buckets", "4"],
+      ["Read by", "<code>risk-scoring-kafka</code> (lookup join) and the inference service (pyfluss)"],
+      ["Batch reads", "need <code>SET 'execution.runtime-mode' = 'batch'</code>"],
+    ],
+    query: "SET 'execution.runtime-mode' = 'batch';\nSELECT * FROM fluss.betting.player_feature_store\nWHERE player_id = 'BOT_001';\nSET 'execution.runtime-mode' = 'streaming';",
+  },
+  risk_scores: {
+    name: "risk_scores", kind: "Flink table · kafka connector · topic risk_scores · JSON",
+    about: "Every bet, scored: written by risk-scoring-kafka, read back by risk-score-log-postgres.",
+    cols: [
+      ["bet_id", "STRING", ""],
+      ["player_id", "STRING", ""],
+      ["risk_level", "STRING", "FRAUD_HIGH · RG_ALERT · SHARP_BETTOR · STAKE_LIMIT · NORMAL"],
+      ["risk_reasons", "STRING", "the rule codes that fired"],
+      ["event_ts", "TIMESTAMP(3)", "the bet's event time"],
+      ["enrichment_lag_ms", "BIGINT", "event time to scoring"],
+      ["score_time", "TIMESTAMP(3)", ""],
+    ],
+    facts: [
+      ["Written by", "<code>risk-scoring-kafka</code>: bets ⋈ feature store <code>FOR SYSTEM_TIME AS OF proc_time</code>"],
+    ],
+    query: "SELECT player_id, risk_level, risk_reasons, enrichment_lag_ms\nFROM risk_scores /*+ OPTIONS('scan.startup.mode' = 'latest-offset') */;",
+  },
+  risk_score_log: {
+    name: "risk_score_log", kind: "Flink table · jdbc connector · PostgreSQL betting.public.risk_score_log",
+    about: "The alerts: every scored bet except NORMAL, upserted by bet_id so a replay overwrites rather than duplicates. Grafana charts this table.",
+    cols: [
+      ["bet_id", "STRING", "", true],
+      ["player_id", "STRING", ""],
+      ["risk_level", "STRING", "never NORMAL"],
+      ["risk_reasons", "STRING", ""],
+      ["event_ts", "TIMESTAMP(3)", ""],
+      ["enrichment_lag_ms", "BIGINT", ""],
+      ["score_time", "TIMESTAMP(3)", ""],
+    ],
+    facts: [
+      ["Written by", "<code>risk-score-log-postgres</code>"],
+      ["Read by", "Grafana"],
+    ],
+    query: "SET 'execution.runtime-mode' = 'batch';\nSELECT risk_level, COUNT(*) AS alerts\nFROM risk_score_log GROUP BY risk_level;\nSET 'execution.runtime-mode' = 'streaming';",
+  },
+};
+
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let lastTrigger = null;
+
+function openTable(key, trigger) {
+  const t = TABLES[key];
+  if (!t) return;
+  lastTrigger = trigger;
+  $("tinfoTitle").textContent = t.name;
+  $("tinfoKind").textContent = t.kind;
+  const rows = t.cols.map(([n, ty, note, pk]) =>
+    `<tr><td>${esc(n)}</td><td>${esc(ty)}${pk ? " <b>*</b>" : ""}</td><td>${esc(note || "")}</td></tr>`).join("");
+  const facts = t.facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+  const hasPk = t.cols.some(c => c[3]);
+  $("tinfoBody").innerHTML = `
+    <p>${esc(t.about)}</p>
+    <h3>Columns (${t.cols.length})${hasPk ? " &middot; <b>*</b> primary key" : ""}</h3>
+    <div class="scroll"><table><thead><tr><th>Name</th><th>Type</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <h3>Key facts</h3><dl>${facts}</dl>
+    <div class="qhd"><h3>Try it in the SQL editor</h3><button type="button" class="copy">Copy</button></div>
+    <pre></pre>`;
+  $("tinfoBody").querySelector("pre").textContent = t.query;
+  $("tinfoBody").querySelector(".copy").onclick = async e => {
+    const btn = e.currentTarget;
+    try { await navigator.clipboard.writeText(t.query); }
+    catch {  // no clipboard API outside a secure context (e.g. http on a remote VM)
+      const ta = Object.assign(document.createElement("textarea"), { value: t.query });
+      document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    }
+    btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1200);
+  };
+  $("tinfo").showModal();
+  $("tinfoBody").scrollTop = 0;
+}
+document.querySelectorAll(".arch .tbl").forEach(g => {
+  g.addEventListener("click", () => openTable(g.dataset.table, g));
+  g.addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openTable(g.dataset.table, g); }
+  });
+});
+$("tinfoClose").onclick = () => $("tinfo").close();
+// Back to the box that opened it, so keyboard users keep their place in the diagram.
+$("tinfo").addEventListener("close", () => lastTrigger && lastTrigger.focus());
+// A click on the backdrop lands on the <dialog> itself, outside its content box.
+$("tinfo").addEventListener("click", e => {
+  const r = $("tinfo").getBoundingClientRect();
+  if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) $("tinfo").close();
+});
+
+// Light/dark toggle — follow the OS until the first click, then remember the choice.
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+const isDark = () => (document.documentElement.dataset.theme || (darkQuery.matches ? "dark" : "light")) === "dark";
+function paintTheme() {
+  const next = isDark() ? "light" : "dark";
+  $("theme").textContent = isDark() ? "☀" : "☾";
+  $("theme").title = `Switch to ${next} mode`;
+  $("theme").setAttribute("aria-label", `Switch to ${next} mode`);
+}
+$("theme").onclick = () => {
+  const t = isDark() ? "light" : "dark";
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem("home.theme", t); } catch {}
+  paintTheme();
+};
+darkQuery.addEventListener("change", paintTheme);
+paintTheme();
+</script>
+</body>
+</html>
