@@ -8,6 +8,7 @@
 #   cd scenarios/betting_features_oss
 #   ./start.sh                  # services + DDL + all 9 streaming jobs
 #   ./start.sh --services-only  # containers only; run the DDL and jobs yourself
+#   ./start.sh --reset          # wipe every volume first (combines with --services-only)
 #
 # Memory defaults target a 64 GB host. On a laptop:
 #   TM_PROCESS_SIZE=5g JM_PROCESS_SIZE=2g TASK_SLOTS=12 TM_FRAMEWORK_OFFHEAP=512m ./start.sh
@@ -16,6 +17,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 SERVICES_ONLY=0
+RESET=0
 
 usage() {
   cat <<'EOF'
@@ -30,6 +32,12 @@ start.sh — betting_features_oss scenario bootstrap
                               browser (http://localhost:8084/pipeline), or run the
                               commands printed at the end by hand.
 
+  ./start.sh --reset          Remove every container and volume first, and empty
+                              fluss-remote-data/: Fluss tables, Kafka topics,
+                              PostgreSQL, checkpoints and running jobs are all
+                              rebuilt. Combine with --services-only for a clean,
+                              empty environment.
+
   -h, --help                  Show this.
 
 Memory defaults target a 64 GB host. Override for a laptop:
@@ -40,6 +48,7 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --services-only) SERVICES_ONLY=1 ;;
+    --reset)         RESET=1 ;;
     -h|--help)       usage; exit 0 ;;
     *) echo "ERROR: unknown option '$1'"; echo; usage; exit 1 ;;
   esac
@@ -63,6 +72,19 @@ else
 fi
 
 # ── Step 2: Start Docker Compose services ─────────────────────────────────────
+
+if [ "$RESET" = "1" ]; then
+  echo ""
+  echo "==> --reset: removing containers and every volume..."
+  docker compose down -v --remove-orphans
+  # Fluss's remote data is a host bind mount, not a volume, so `down -v` leaves it.
+  # Its files belong to tables the fresh ZooKeeper no longer knows. Fluss writes them
+  # as root, hence the throwaway-container fallback (same as destroy.sh --data).
+  echo "==> --reset: emptying fluss-remote-data/..."
+  rm -rf fluss-remote-data 2>/dev/null || \
+    docker run --rm -v "$PWD:/w" -w /w alpine:3 rm -rf fluss-remote-data
+  mkdir -p fluss-remote-data
+fi
 
 echo ""
 echo "==> Starting Docker Compose services..."
@@ -278,7 +300,10 @@ echo "  Verify the PostgreSQL analytics table (what Grafana charts):"
 echo "    docker compose exec -T postgres psql -U root -d betting \\"
 echo "      -c 'SELECT risk_level, COUNT(*) FROM public.risk_score_log GROUP BY 1;'"
 echo ""
-echo "  Pause (keeps PostgreSQL / Fluss / checkpoint state):"
+echo "  Start again from nothing (Fluss, Kafka, PostgreSQL all wiped):"
+echo "    ./start.sh --reset --services-only"
+echo ""
+echo "  Stop (keeps PostgreSQL and checkpoints; Fluss tables and Kafka topics are lost):"
 echo "    docker compose down"
 echo ""
 echo "  Destroy everything:"

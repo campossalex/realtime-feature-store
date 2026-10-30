@@ -23,20 +23,17 @@
 
 -- ── Job A: CDC dimensions ─────────────────────────────────────────────────────
 -- Fires on every change to players or player_wallets tables.
+-- Writes ONLY the dimension columns. A player with no bet yet has NULL windowed
+-- features, which the readers (05's COALESCEs, the inference service's _f()) treat as
+-- their defaults. Writing zeros here instead would wipe live features: the windowed
+-- jobs update per event, so a zero from a wallet change (or this job's snapshot
+-- finishing after bets started) would stick until the player's next event.
 
 SET 'pipeline.name' = 'jobA-cdc-dimensions';
 
 INSERT INTO fluss.betting.player_feature_store (
   player_id,
   kyc_tier, balance, lifetime_deposits,
-  bets_last_10min,
-  total_stake_30min,
-  distinct_sports_30min,
-  current_loss_streak,
-  live_bet_ratio_15min,
-  avg_odds_15min,
-  geo_mismatches_15min,
-  net_pnl_30min,
   last_updated_at
 )
 SELECT
@@ -44,14 +41,6 @@ SELECT
   p.kyc_tier,
   w.balance,
   w.lifetime_deposits,
-  CAST(0    AS BIGINT)        AS bets_last_10min,
-  CAST(0.00 AS DECIMAL(14,2)) AS total_stake_30min,
-  CAST(0    AS BIGINT)        AS distinct_sports_30min,
-  CAST(0    AS BIGINT)        AS current_loss_streak,
-  CAST(0.0  AS DOUBLE)        AS live_bet_ratio_15min,
-  CAST(0.0  AS DOUBLE)        AS avg_odds_15min,
-  CAST(0    AS BIGINT)        AS geo_mismatches_15min,
-  CAST(0.00 AS DECIMAL(14,2)) AS net_pnl_30min,
   CURRENT_TIMESTAMP           AS last_updated_at
 FROM players_cdc AS p
 JOIN player_wallets_cdc AS w ON p.player_id = w.player_id;

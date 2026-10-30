@@ -44,11 +44,16 @@ app = Flask(__name__, static_folder="static")
 
 # ── SQL text handling ─────────────────────────────────────────────────────────
 
+STATEMENT_SET = re.compile(r"\s*EXECUTE\s+STATEMENT\s+SET\s+BEGIN\b", re.I)
+
+
 def split_statements(sql):
     """Split a script into statements on `;`, dropping comments.
 
     A character scanner rather than str.split: string literals can hold `;` or `--`,
     and 01_sources_and_catalogs.sql puts `--` comments inside WITH (...) clauses.
+    An `EXECUTE STATEMENT SET BEGIN ... END;` stays one statement: the `;` after each
+    INSERT inside it does not end it (04_feature_calculations.sql uses them).
     """
     out, buf, i, n = [], [], 0, len(sql)
     while i < n:
@@ -78,8 +83,12 @@ def split_statements(sql):
             j = sql.find("*/", i + 2)
             i = n if j < 0 else j + 2
         elif c == ";":
-            out.append("".join(buf))
-            buf = []
+            stmt = "".join(buf)
+            if STATEMENT_SET.match(stmt) and not re.search(r"\bEND\s*$", stmt, re.I):
+                buf.append(c)
+            else:
+                out.append(stmt)
+                buf = []
             i += 1
         else:
             buf.append(c)

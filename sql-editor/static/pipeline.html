@@ -371,7 +371,7 @@
         <rect class="box" x="262" y="116" width="300" height="48" rx="6"/>
         <use class="icon" href="#i-flink" x="268" y="130" width="20" height="20"/>
         <text class="title" x="294" y="137">B1 · bet velocity</text>
-        <text class="sub" x="294" y="154">HOP 10 min · bets_last_10min</text>
+        <text class="sub" x="294" y="154">OVER 10 min · bets_last_10min</text>
         <line class="edge" x1="562" y1="140" x2="618" y2="140" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobB2">
@@ -379,7 +379,7 @@
         <rect class="box" x="262" y="176" width="300" height="48" rx="6"/>
         <use class="icon" href="#i-flink" x="268" y="190" width="20" height="20"/>
         <text class="title" x="294" y="197">B2 · live ratio, avg odds</text>
-        <text class="sub" x="294" y="214">HOP 15 min · live_bet_ratio</text>
+        <text class="sub" x="294" y="214">OVER 15 min · live_bet_ratio</text>
         <line class="edge" x1="562" y1="200" x2="618" y2="200" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobB3">
@@ -387,7 +387,7 @@
         <rect class="box" x="262" y="236" width="300" height="48" rx="6"/>
         <use class="icon" href="#i-flink" x="268" y="250" width="20" height="20"/>
         <text class="title" x="294" y="257">B3 · stake, sport variety</text>
-        <text class="sub" x="294" y="274">HOP 30 min · total_stake</text>
+        <text class="sub" x="294" y="274">OVER 30 min · total_stake</text>
         <line class="edge" x1="562" y1="260" x2="618" y2="260" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobC1">
@@ -395,7 +395,7 @@
         <rect class="box" x="262" y="296" width="300" height="48" rx="6"/>
         <use class="icon" href="#i-flink" x="268" y="310" width="20" height="20"/>
         <text class="title" x="294" y="317">C1 · net P&amp;L</text>
-        <text class="sub" x="294" y="334">HOP 30 min · net_pnl_30min</text>
+        <text class="sub" x="294" y="334">OVER 30 min · net_pnl_30min</text>
         <line class="edge" x1="562" y1="320" x2="618" y2="320" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobC2">
@@ -411,7 +411,7 @@
         <rect class="box" x="262" y="416" width="300" height="48" rx="6"/>
         <use class="icon" href="#i-flink" x="268" y="430" width="20" height="20"/>
         <text class="title" x="294" y="437">D · geo mismatches</text>
-        <text class="sub" x="294" y="454">HOP 15 min · distinct countries</text>
+        <text class="sub" x="294" y="454">OVER 15 min · distinct countries</text>
         <line class="edge" x1="562" y1="440" x2="618" y2="440" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="risk_scoring">
@@ -817,8 +817,8 @@ const ABOUT = {
   feature_store: "fluss.betting.player_feature_store: a Fluss primary-key table, one row per player, the online feature store. Seven Flink jobs write it, each only its own columns: Fluss merges partial-column upserts into the row. It lives in Fluss itself, so unlike the source tables it survives a new session — Create is CREATE TABLE IF NOT EXISTS.",
   risk_scores: "The Kafka topic risk_scores: one row per bet, with its risk level, the rules it tripped and how long enrichment took. Registering it creates nothing in Kafka — the topic is created by redpanda-init.",
   risk_score_log: "PostgreSQL's public.risk_score_log, through a JDBC table keyed by bet_id, so replays overwrite rather than duplicate. Only alerts (everything but NORMAL) land here; it is what Grafana charts.",
-  jobA: "Job A, jobA-cdc-dimensions: joins players_cdc with player_wallets_cdc and writes kyc_tier, balance and lifetime_deposits for every player — plus zeroes for the windowed features, so every player has a full row before any bet. Start it first: it snapshots PostgreSQL before any row reaches Fluss.",
-  jobB1: "Job B1, jobB1-bet-velocity: bets per player in a 10-minute HOP window sliding every 10 s. A 20-minute wide window LEFT JOINed with it resets the feature to 0 when a player goes quiet. Above 8 = likely bot.",
+  jobA: "Job A, jobA-cdc-dimensions: joins players_cdc with player_wallets_cdc and writes kyc_tier, balance and lifetime_deposits for every player, and only those columns: a windowed feature stays NULL until the player's first event, which the scoring job and the inference service read as its default. Start it first: it snapshots PostgreSQL before any row reaches Fluss.",
+  jobB1: "Job B1, jobB1-bet-velocity: bets per player over the last 10 minutes, rewritten on every bet by a processing-time OVER window — no window slide to wait for. A second INSERT in the same statement set, a HOP window, resets the feature to 0 once a player has been quiet for 10 minutes. Above 8 = likely bot.",
   jobB2: "Job B2, jobB2-live-ratio-avg-odds: share of live bets and average odds over 15 minutes. A live ratio above 0.5 is impulsive betting; low average odds with high velocity is a sharp bettor.",
   jobB3: "Job B3, jobB3-stake-sport-variety: total stake and distinct sports over 30 minutes. Above 500 trips the stake limit; four or more sports looks like chasing losses.",
   jobC1: "Job C1, jobC1-net-pnl: the operator's net P&L per player over 30 minutes, from bet_settlements: stakes minus payouts.",
@@ -1277,7 +1277,7 @@ const GUIDE = [
     look: "The box turns green: the generators have been publishing all along.",
     done: s => s.nodes.bets.exists },
   { a: "deploy", t: "jobB1", li: 2, lab: "04", title: "Deploy B1 · bet velocity",
-    what: "Bets per player in a <b>10-minute HOP window</b> sliding every 10 s, LEFT JOINed with a wider window so a quiet player resets to 0.",
+    what: "Bets per player over the last 10 minutes, rewritten on <b>every bet</b> by an <b>OVER window</b>; a HOP window in the same job resets a quiet player to 0.",
     look: "The job box turns green.",
     done: s => s.edges.jobB1.state === "running" },
   { a: "deploy", t: "jobB2", li: 2, lab: "04", title: "Deploy B2 · live ratio and average odds",

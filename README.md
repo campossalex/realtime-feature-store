@@ -51,7 +51,8 @@ Fluss is the only store — there is no cold/lakehouse tier. See
 | Primary key | `player_id` |
 | Writers | 7 independent Flink jobs — each writes only its own columns |
 | Readers | Flink temporal join (sub-ms) + pyfluss REST API (5–20 ms) |
-| Zero-fill | Double-HOP LEFT JOIN resets stale features to `0` when a player goes quiet |
+| Freshness | Per-event: a processing-time OVER window rewrites the player's features on every bet, settlement or login |
+| Zero-fill | A HOP window in the same job resets a feature to its default once the player goes quiet |
 | Loss streak | MATCH_RECOGNIZE on `bet_settlements` — fires on each pattern `L+ W` |
 | Cold storage | None. Fluss holds current state only; no tiering, no time travel |
 
@@ -190,27 +191,33 @@ Count it against the number of running jobs — one per job per minute. A count 
 ## Quick Start
 
 ```bash
-git clone https://github.com/campossalex/realtime-feature-store
-
+git clone https://github.com/campossalex/realtime-feature-store.git
 cd realtime-feature-store
 
-# 1. Download connector JARs (one-time, ~92 MB)
-./download-jars.sh
-
-# 2. Start everything — services, DDL and all 9 streaming jobs
-./start.sh
-
-#    ...or bring up only the containers and build the pipeline yourself, in the
-#    browser at http://localhost:8084/pipeline or with the printed commands.
 ./start.sh --services-only
-
-#    Everything is linked from the environment homepage: http://localhost
-
-# 3. Trigger a fraud outliner and watch the risk score flip
-curl -X POST http://localhost:9050/trigger \
-  -H "Content-Type: application/json" \
-  -d '{"archetype": "BOT"}'
 ```
+
+Then open **http://localhost** — the environment homepage, with a link to every tool.
+
+`start.sh` downloads the JARs on first run, starts the stack and waits until every
+service is healthy, then prints the URLs and a runbook of manual commands. The two modes:
+
+| Command | Result | Use it for |
+|---|---|---|
+| `./start.sh --services-only` | Everything running, nothing submitted; the Fluss database is empty | **A workshop** — attendees build the pipeline in the [Pipeline Builder](#browser-interfaces) |
+| `./start.sh` | Also creates the feature store and submits all 9 streaming jobs | **A demo** — the finished pipeline |
+| add `--reset` to either | Wipes every volume first: Fluss, Kafka, PostgreSQL, checkpoints | **Handing a clean environment** to the next group |
+
+Then fire an outlier and watch its risk score flip: `curl -X POST http://localhost:9050/run/BOT`.
+
+To stop:
+
+```bash
+docker compose down -v      # stop everything and delete its data
+```
+
+`./start.sh --reset` is the only clean restart — see [Teardown](#teardown) for why a plain
+`down`/`up` is not.
 
 ---
 
@@ -410,12 +417,10 @@ the inference service returns empty features.
 open http://localhost:9050
 
 # Or via REST
-curl -X POST http://localhost:9050/trigger \
-  -H "Content-Type: application/json" \
-  -d '{"archetype": "BOT", "player_id": "BOT_001"}'
+curl -X POST http://localhost:9050/run/BOT
 ```
 
-BOT_001 will place 20 bets in under 10 minutes. The feature store updates within 10 seconds.
+BOT_001 will place 20 bets in under 10 minutes. The feature store updates on every bet, within about a second.
 
 ### Verify the feature store
 
@@ -485,12 +490,18 @@ whose service has since been renamed or removed from the compose file.
 
 Both `--data` and `--jars` target git-ignored generated directories.
 
-To pause without losing state, stop the containers but keep the volumes — PostgreSQL and the
-Flink checkpoints both survive:
+`docker compose down` without `-v` is **not** a pause. PostgreSQL and the Flink checkpoints
+live in volumes and survive it, but Redpanda, ZooKeeper and the Fluss servers keep their data
+inside their containers: the Kafka topics, the Fluss tables and every feature row are gone on
+the next `up`, while PostgreSQL still holds the old players and replication slots. For a
+consistent environment, restart with:
 
 ```bash
-docker compose down
+./start.sh --reset --services-only
 ```
+
+That runs `docker compose down -v` and also empties `fluss-remote-data/` — a host bind
+mount, not a volume — so everything starts from nothing.
 
 ---
 
@@ -522,9 +533,13 @@ The payload `event_time` and the converted record timestamp should be a few hund
 
 **A feature takes minutes to update after triggering an outliner**
 
-Almost always watermark lag, not slow processing. Every window job here is **event-time**
-(`DESCRIPTOR(event_ts)`), so a window emits only once the watermark passes `window_end` —
-a starved watermark stalls output no matter how idle the CPU is.
+The per-event updates (the OVER windows in `04_feature_calculations.sql`) run on processing
+time and do not wait for watermarks, so a slow *increase* points at the job itself (not
+running, restarting, back-pressured). What still waits for the watermark is the **reset**
+half of each job — the HOP window that writes the default once a player goes quiet — and
+the risk scoring, Job C2's MATCH_RECOGNIZE and anything in `06`. Those are **event-time**
+(`DESCRIPTOR(event_ts)` / `ORDER BY event_ts`), so they emit only once the watermark passes
+— a starved watermark stalls them no matter how idle the CPU is.
 
 Every topic is created with **4 partitions** and the generators call `producer.send()` with
 no key, so records round-robin across all four. A Flink Kafka source emits the **minimum**
@@ -559,8 +574,8 @@ Note this option is `table.exec.*`, so it is compiled into the plan **client-sid
 it in the jobmanager's `FLINK_PROPERTIES` has no effect; it must be in the SQL session or the
 `sql-client` config.
 
-Expect ~15–25 s end-to-end after the fix: the HOP slide is 10 s, plus the 2 s watermark
-delay, plus the Fluss write. Also check the archetype's own pacing before calling it slow —
+After the fix, a reset lands within ~12 s of a player's window emptying: the HOP slide is
+10 s, plus the 2 s watermark delay, plus the Fluss write. Also check the archetype's own pacing before calling it slow —
 `run_geo()` sleeps 35 s between the GB and Brazil logins, so the mismatch does not exist to
 be detected until 35 s after you trigger it.
 

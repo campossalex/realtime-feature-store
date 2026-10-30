@@ -157,7 +157,7 @@ def seed_outliners():
 # ── Archetype scenarios ────────────────────────────────────────────────────────
 
 def run_bot():
-    """BOT_001: 25 bets in ~2 min at fixed odds → BOT_VELOCITY within the first HOP slide."""
+    """BOT_001: 25 bets in ~2 min at fixed odds → BOT_VELOCITY from the 9th bet (features update per event)."""
     log("=== BOT_001 — 25 bets in ~2 min ===")
     send_login("BOT_001", "GB")
     for i in range(25):
@@ -204,8 +204,8 @@ def run_streak():
 
 def run_live():
     """LIVE_001: 10 out of 12 bets are live → HIGH_LIVE_RATIO within ~1 min.
-    HOP slide is 10 s; bets arrive every 8–10 s so ~7 bets land before the
-    first feature-store update that crosses the 0.5 ratio threshold.
+    Features update on every bet; bets arrive every 8–10 s and the ratio crosses
+    the 0.5 threshold from the first live bet onwards.
     """
     log("=== LIVE_001 — 90% live bet ratio (12 bets, 8–10 s apart) ===")
     send_login("LIVE_001", "ES")
@@ -232,7 +232,7 @@ def run_sharp():
                  bet_type="single", sport="football",
                  odds=round(random.uniform(1.05, 1.95), 2))
         time.sleep(random.uniform(3, 5))
-    log("=== SHARP_001 done — SHARP_BETTOR expected within next HOP slide ===")
+    log("=== SHARP_001 done — SHARP_BETTOR expected from the next bet ===")
 
 
 def run_limit():
@@ -261,7 +261,7 @@ ARCHETYPES = {
 }
 
 ARCHETYPE_META = {
-    "BOT":    {"label": "Bot / Velocity",      "player": "BOT_001",    "rule": "BOT_VELOCITY",      "desc": "25 bets in ~2 min at identical odds — triggers FRAUD_HIGH on the first feature-store slide"},
+    "BOT":    {"label": "Bot / Velocity",      "player": "BOT_001",    "rule": "BOT_VELOCITY",      "desc": "25 bets in ~2 min at identical odds — triggers FRAUD_HIGH from the 9th bet"},
     "GEO":    {"label": "Geo Mismatch",         "player": "GEO_001",    "rule": "GEO_MISMATCH",      "desc": "Login from GB then Brazil in the same 15-min window"},
     "STREAK": {"label": "Loss Streak",          "player": "STREAK_001", "rule": "LOSS_STREAK",       "desc": "8 consecutive losses rotating across all 8 sports → LOSS_STREAK + CHASING_LOSSES"},
     "LIVE":   {"label": "Live Bet Addict",      "player": "LIVE_001",   "rule": "HIGH_LIVE_RATIO",   "desc": "10 of 12 bets are live (83% ratio), one bet every 8–10 s — triggers RG_ALERT in ~1 min"},
