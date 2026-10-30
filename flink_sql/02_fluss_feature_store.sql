@@ -1,16 +1,29 @@
 -- ============================================================
--- Step 2 – Create the Fluss online feature store
+-- Step 2 – Create the online feature store
 --
--- Identical to betting_features/flink_sql/02_fluss_feature_store.sql.
--- Run after 01_sources_and_catalogs.sql in the same SQL Client session.
+-- Run after 01_sources_and_catalogs.sql. Both modes.
+--
+--   player_feature_store        a PRIMARY-KEY table in fluss.betting — one row per
+--                               player, the online feature store. Not tiered: it is
+--                               current state only.
+--
+-- The event LOG tables (fluss.betting.bets, …) exist in complete mode only, and are
+-- created with the ingest job that fills them: 03_ingest_to_fluss.sql. In simple mode
+-- the feature jobs read the Kafka topics directly.
 --
 -- Window sizes are tuned for a 2-hour workshop. Each windowed feature is rewritten on
 -- every event (a processing-time OVER window) and reset to its default by a HOP window
--- once the player goes quiet — see 04_feature_calculations.sql:
+-- once the player goes quiet — see 05_feature_calculations.sql:
 --   10 min  → bet velocity
 --   15 min  → live ratio, avg odds, geo mismatches
 --   30 min  → stake, sport variety, net P&L
 -- ============================================================
+
+
+-- ── Online feature store ──────────────────────────────────────────────────────
+-- One row per player. Each feature job writes only its own columns (partial updates),
+-- so eight jobs share the row without overwriting each other. A twelfth column,
+-- avg_stake_7d, can be added later — see 08_add_feature_avg_stake.sql.
 
 CREATE TABLE IF NOT EXISTS fluss.betting.player_feature_store (
   player_id            STRING,

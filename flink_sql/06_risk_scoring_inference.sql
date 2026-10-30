@@ -1,8 +1,8 @@
 -- ============================================================
--- Step 4 – Real-time inference (Pipeline 2)
+-- Step 6 – Real-time inference (Pipeline 2)
 --
 -- Architecture:
---   bets (Kafka/Redpanda)
+--   fluss.betting.bets (Fluss log table, fed from Kafka by 03_)
 --       │
 --       │  temporal lookup join  ← fluss.betting.player_feature_store
 --       ▼
@@ -26,6 +26,13 @@
 
 
 -- ── Rule-based scoring → Kafka topic 'risk_scores' ───────────────────────────
+-- Scores each new bet from the Fluss log table. 'latest' for the same reason as the
+-- feature jobs (05_): a union read would re-score the whole Iceberg history first. In
+-- simple mode the view reads bets_kafka from its latest offset instead (see 05_).
+CREATE TEMPORARY VIEW IF NOT EXISTS bets_live AS
+SELECT *, PROCTIME() AS proc_time
+FROM fluss.betting.bets /*+ OPTIONS('scan.startup.mode' = 'latest') */;
+
 SET 'pipeline.name' = 'risk-scoring-kafka';
 
 INSERT INTO risk_scores
@@ -96,7 +103,7 @@ FROM (
     COALESCE(f.net_pnl_30min,         0.00)    AS net_pnl_30min,
     COALESCE(f.kyc_tier,              'BASIC') AS kyc_tier,
     COALESCE(f.balance,               0.00)    AS balance
-  FROM bets AS b
+  FROM bets_live AS b
   LEFT JOIN fluss.betting.player_feature_store FOR SYSTEM_TIME AS OF b.proc_time AS f
     ON b.player_id = f.player_id
 ) AS enriched;

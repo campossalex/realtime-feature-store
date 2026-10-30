@@ -25,11 +25,11 @@
           /* Region washes, one light colour per column of the diagram. */
           /* (light shades dark enough for the labels: 4.5:1 or more against their wash) */
           --sources: #a64f00; --flink: #7d5f00; --model: #b3264a;
-          --warehouse: #7a45c9; --consumers: #22703d; }
+          --warehouse: #7a45c9; --consumers: #22703d; --lake: #1f6f9f; }
   @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --warn: #e3b341;
-    --sources: #f5a25a; --flink: #e8c547; --model: #ff8fa8; --warehouse: #c4a2ff; --consumers: #71d394; } }
+    --sources: #f5a25a; --flink: #e8c547; --model: #ff8fa8; --warehouse: #c4a2ff; --consumers: #71d394; --lake: #7cc0f0; } }
   :root[data-theme="dark"] { --warn: #e3b341;
-    --sources: #f5a25a; --flink: #e8c547; --model: #ff8fa8; --warehouse: #c4a2ff; --consumers: #71d394; }
+    --sources: #f5a25a; --flink: #e8c547; --model: #ff8fa8; --warehouse: #c4a2ff; --consumers: #71d394; --lake: #7cc0f0; }
 
   * { box-sizing: border-box; }
   /* The page is the diagram: header on top, the stage fills the rest of the window and
@@ -88,6 +88,10 @@
   .arch .region.model { stroke: color-mix(in srgb, var(--model) 55%, transparent); fill: color-mix(in srgb, var(--model) 10%, transparent); }
   .arch .region.warehouse { stroke: color-mix(in srgb, var(--warehouse) 55%, transparent); fill: color-mix(in srgb, var(--warehouse) 10%, transparent); }
   .arch .region.consumers { stroke: color-mix(in srgb, var(--consumers) 55%, transparent); fill: color-mix(in srgb, var(--consumers) 10%, transparent); }
+  .arch .region.lake { stroke: color-mix(in srgb, var(--lake) 55%, transparent); fill: color-mix(in srgb, var(--lake) 10%, transparent); }
+  /* The optional new-feature walkthrough: no wash, a finer dash — not part of the core pipeline. */
+  .arch .region.optional { stroke: var(--muted); stroke-dasharray: 2 4; fill: none; }
+  .job[data-optional] .box { stroke-dasharray: 4 3; }
   .arch .title { fill: var(--fg); font-size: 13px; font-weight: 600; }
   .arch .icon { fill: var(--fg); color: var(--fg); opacity: .85; }
   .node[data-state="inactive"] .icon { opacity: .4; }
@@ -95,6 +99,12 @@
   .arch .region-label { fill: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .06em; }
   .arch .region-label.sources { fill: var(--sources); } .arch .region-label.flink { fill: var(--flink); } .arch .region-label.model { fill: var(--model); }
   .arch .region-label.warehouse { fill: var(--warehouse); } .arch .region-label.consumers { fill: var(--consumers); }
+  .arch .region-label.lake { fill: var(--lake); } .arch .region-label.optional { fill: var(--muted); }
+  /* The two modes (app.py sets data-mode). Simple: the jobs read Kafka directly — no
+     ingest, no Fluss log tables, no lake, no tiering, no new feature. data-complete marks
+     what only complete mode has, data-simple what only simple mode draws. */
+  [data-mode="simple"] [data-complete] { display: none; }
+  :root:not([data-mode="simple"]) [data-simple] { display: none; }
   .arch .edge { fill: none; stroke: var(--muted); stroke-width: 1.5; transition: stroke .3s; }
   /* A halo in the background colour, so a region border passing behind a label is masked. */
   .arch .edge-label { fill: var(--muted); font-size: 11px; font-family: var(--mono);
@@ -328,7 +338,7 @@
 
 <div id="layout">
 <div id="stage" class="arch" tabindex="0" aria-label="Pipeline diagram: drag to pan, scroll or pinch to zoom, + and - keys to zoom, 0 to reset the view">
-    <svg id="diagram" viewBox="0 0 1350 540" preserveAspectRatio="xMidYMid meet" role="group" aria-label="Pipeline diagram. Boxes are tables and Flink jobs; each has buttons on or below it.">
+    <svg id="diagram" viewBox="0 0 1690 720" preserveAspectRatio="xMidYMid meet" role="group" aria-label="Pipeline diagram. Boxes are tables and Flink jobs; each has buttons on or below it.">
       <defs>
         <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
         <marker id="head-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-ok" d="M0,0 L10,5 L0,10 z"/></marker>
@@ -344,97 +354,139 @@
         <marker id="head-err" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-err" d="M0,0 L10,5 L0,10 z"/></marker>
       </defs>
 
-      <!-- Columns, left to right: sources · Flink feature jobs · Fluss · scoring and serving · tools -->
-      <rect class="region sources" x="8" y="20" width="200" height="510" rx="10"/>
+      <!-- Columns, left to right: sources · ingest + Fluss event logs (with the Iceberg lake below) ·
+           Flink feature jobs (with the optional new feature below) · the online store · scoring and serving · tools -->
+      <rect class="region sources" x="8" y="20" width="200" height="690" rx="10"/>
       <text class="region-label sources" x="22" y="42">DATA SOURCES</text>
-      <rect class="region flink" x="244" y="20" width="334" height="510" rx="10"/>
-      <text class="region-label flink" x="258" y="42">APACHE FLINK · feature jobs</text>
-      <rect class="region warehouse" x="600" y="20" width="220" height="510" rx="10"/>
-      <text class="region-label warehouse" x="614" y="42">APACHE FLUSS · online store</text>
-      <rect class="region model" x="842" y="20" width="276" height="510" rx="10"/>
-      <text class="region-label model" x="856" y="42">SCORING &amp; SERVING</text>
-      <rect class="region consumers" x="1140" y="20" width="200" height="510" rx="10"/>
-      <text class="region-label consumers" x="1154" y="42">TOOLS</text>
+      <rect class="region flink" data-complete="" x="224" y="224" width="164" height="364" rx="10"/>
+      <text class="region-label flink" data-complete="" x="238" y="243">FLINK · ingest</text>
+      <rect class="region warehouse" data-complete="" x="404" y="224" width="200" height="364" rx="10"/>
+      <text class="region-label warehouse" data-complete="" x="418" y="243">FLUSS · event logs</text>
+      <rect class="region lake" data-complete="" x="224" y="604" width="380" height="106" rx="10"/>
+      <text class="region-label lake" data-complete="" x="238" y="622">LAKEHOUSE · Iceberg</text>
+      <rect class="region flink" x="624" y="20" width="334" height="566" rx="10"/>
+      <text class="region-label flink" x="638" y="42">APACHE FLINK · feature jobs</text>
+      <rect class="region optional" data-complete="" x="624" y="596" width="334" height="114" rx="10"/>
+      <text class="region-label optional" data-complete="" x="638" y="614">NEW FEATURE · avg_stake_7d (08)</text>
+      <rect class="region warehouse" x="972" y="20" width="204" height="690" rx="10"/>
+      <text class="region-label warehouse" x="986" y="42">FLUSS · online store</text>
+      <rect class="region model" x="1192" y="20" width="276" height="690" rx="10"/>
+      <text class="region-label model" x="1206" y="42">SCORING &amp; SERVING</text>
+      <rect class="region consumers" x="1484" y="20" width="200" height="690" rx="10"/>
+      <text class="region-label consumers" x="1498" y="42">TOOLS</text>
 
       <!-- Jobs: the arrows in, the job's box, the arrow out. data-edge matches /api/pipeline/status. -->
+      <g class="job" data-edge="ingest" data-complete="">
+        <polyline class="edge" points="193,316 236,316" marker-end="url(#head)"/>
+        <rect class="box" x="238" y="292" width="136" height="56" rx="6"/>
+        <use class="icon" href="#i-flink" x="244" y="310" width="20" height="20"/>
+        <text class="title" x="270" y="316">Ingest</text>
+        <text class="sub" x="270" y="334">Kafka → Fluss</text>
+        <polyline class="edge" points="374,320 392,320 392,276 416,276" marker-end="url(#head)"/>
+        <polyline class="edge" points="374,320 392,320 392,356 416,356" marker-end="url(#head)"/>
+        <polyline class="edge" points="374,320 392,320 392,436 416,436" marker-end="url(#head)"/>
+        <polyline class="edge" points="374,320 392,320 392,516 416,516" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="tiering" data-complete="">
+        <polyline class="edge" points="503,572 503,598 400,598 400,632" marker-end="url(#head)"/>
+        <rect class="box" x="238" y="634" width="176" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="244" y="648" width="20" height="20"/>
+        <text class="title" x="270" y="655">Tiering service</text>
+        <text class="sub" x="270" y="672">Fluss → Iceberg</text>
+        <line class="edge" x1="414" y1="658" x2="428" y2="658" marker-end="url(#head)"/>
+      </g>
       <g class="job" data-edge="jobA">
-        <polyline class="edge" points="193,82 228,82 228,74 260,74" marker-end="url(#head)"/>
-        <polyline class="edge" points="193,178 228,178 228,86 260,86" marker-end="url(#head)"/>
-        <rect class="box" x="262" y="56" width="300" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="268" y="70" width="20" height="20"/>
-        <text class="title" x="294" y="77">A · CDC dimensions</text>
-        <text class="sub" x="294" y="94">kyc_tier, balance, deposits</text>
-        <line class="edge" x1="562" y1="80" x2="618" y2="80" marker-end="url(#head)"/>
+        <polyline class="edge" points="193,82 600,82 600,74 636,74" marker-end="url(#head)"/>
+        <polyline class="edge" points="193,172 608,172 608,86 636,86" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="56" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="70" width="20" height="20"/>
+        <text class="title" x="670" y="77">A · CDC dimensions</text>
+        <text class="sub" x="670" y="94">kyc_tier, balance, deposits</text>
+        <polyline class="edge" points="938,80 986,80" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobB1">
-        <polyline class="edge" points="193,274 236,274 236,140 260,140" marker-end="url(#head)"/>
-        <rect class="box" x="262" y="116" width="300" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="268" y="130" width="20" height="20"/>
-        <text class="title" x="294" y="137">B1 · bet velocity</text>
-        <text class="sub" x="294" y="154">OVER 10 min · bets_last_10min</text>
-        <line class="edge" x1="562" y1="140" x2="618" y2="140" marker-end="url(#head)"/>
+        <polyline class="edge" data-complete="" points="588,276 600,276 600,200 636,200" marker-end="url(#head)"/>
+        <polyline class="edge" data-simple="" points="193,300 560,300 560,200 636,200" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="176" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="190" width="20" height="20"/>
+        <text class="title" x="670" y="197">B1 · bet velocity</text>
+        <text class="sub" x="670" y="214">OVER 10 min · bets_last_10min</text>
+        <polyline class="edge" points="938,200 986,200" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobB2">
-        <polyline class="edge" points="193,274 236,274 236,200 260,200" marker-end="url(#head)"/>
-        <rect class="box" x="262" y="176" width="300" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="268" y="190" width="20" height="20"/>
-        <text class="title" x="294" y="197">B2 · live ratio, avg odds</text>
-        <text class="sub" x="294" y="214">OVER 15 min · live_bet_ratio</text>
-        <line class="edge" x1="562" y1="200" x2="618" y2="200" marker-end="url(#head)"/>
+        <polyline class="edge" data-complete="" points="588,276 600,276 600,260 636,260" marker-end="url(#head)"/>
+        <polyline class="edge" data-simple="" points="193,300 560,300 560,260 636,260" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="236" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="250" width="20" height="20"/>
+        <text class="title" x="670" y="257">B2 · live ratio, avg odds</text>
+        <text class="sub" x="670" y="274">OVER 15 min · live_bet_ratio</text>
+        <polyline class="edge" points="938,260 986,260" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobB3">
-        <polyline class="edge" points="193,274 236,274 236,260 260,260" marker-end="url(#head)"/>
-        <rect class="box" x="262" y="236" width="300" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="268" y="250" width="20" height="20"/>
-        <text class="title" x="294" y="257">B3 · stake, sport variety</text>
-        <text class="sub" x="294" y="274">OVER 30 min · total_stake</text>
-        <line class="edge" x1="562" y1="260" x2="618" y2="260" marker-end="url(#head)"/>
+        <polyline class="edge" data-complete="" points="588,276 600,276 600,320 636,320" marker-end="url(#head)"/>
+        <polyline class="edge" data-simple="" points="193,300 560,300 560,320 636,320" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="296" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="310" width="20" height="20"/>
+        <text class="title" x="670" y="317">B3 · stake, sport variety</text>
+        <text class="sub" x="670" y="334">OVER 30 min · total_stake</text>
+        <polyline class="edge" points="938,320 986,320" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobC1">
-        <polyline class="edge" points="193,370 236,370 236,320 260,320" marker-end="url(#head)"/>
-        <rect class="box" x="262" y="296" width="300" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="268" y="310" width="20" height="20"/>
-        <text class="title" x="294" y="317">C1 · net P&amp;L</text>
-        <text class="sub" x="294" y="334">OVER 30 min · net_pnl_30min</text>
-        <line class="edge" x1="562" y1="320" x2="618" y2="320" marker-end="url(#head)"/>
+        <polyline class="edge" data-complete="" points="588,356 608,356 608,380 636,380" marker-end="url(#head)"/>
+        <polyline class="edge" data-simple="" points="193,316 576,316 576,380 636,380" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="356" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="370" width="20" height="20"/>
+        <text class="title" x="670" y="377">C1 · net P&amp;L</text>
+        <text class="sub" x="670" y="394">OVER 30 min · net_pnl_30min</text>
+        <polyline class="edge" points="938,380 986,380" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobC2">
-        <polyline class="edge" points="193,370 236,370 236,380 260,380" marker-end="url(#head)"/>
-        <rect class="box" x="262" y="356" width="300" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="268" y="370" width="20" height="20"/>
-        <text class="title" x="294" y="377">C2 · loss streak</text>
-        <text class="sub" x="294" y="394">MATCH_RECOGNIZE (L+ W)</text>
-        <line class="edge" x1="562" y1="380" x2="618" y2="380" marker-end="url(#head)"/>
+        <polyline class="edge" data-complete="" points="588,356 608,356 608,440 636,440" marker-end="url(#head)"/>
+        <polyline class="edge" data-simple="" points="193,316 576,316 576,440 636,440" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="416" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="430" width="20" height="20"/>
+        <text class="title" x="670" y="437">C2 · loss streak</text>
+        <text class="sub" x="670" y="454">MATCH_RECOGNIZE (L+ W)</text>
+        <polyline class="edge" points="938,440 986,440" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="jobD">
-        <polyline class="edge" points="193,466 236,466 236,440 260,440" marker-end="url(#head)"/>
-        <rect class="box" x="262" y="416" width="300" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="268" y="430" width="20" height="20"/>
-        <text class="title" x="294" y="437">D · geo mismatches</text>
-        <text class="sub" x="294" y="454">OVER 15 min · distinct countries</text>
-        <line class="edge" x1="562" y1="440" x2="618" y2="440" marker-end="url(#head)"/>
+        <polyline class="edge" data-complete="" points="588,436 616,436 616,500 636,500" marker-end="url(#head)"/>
+        <polyline class="edge" data-simple="" points="193,332 592,332 592,500 636,500" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="476" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="490" width="20" height="20"/>
+        <text class="title" x="670" y="497">D · geo mismatches</text>
+        <text class="sub" x="670" y="514">OVER 15 min · distinct countries</text>
+        <polyline class="edge" points="938,500 986,500" marker-end="url(#head)"/>
+      </g>
+      <g class="job" data-edge="jobE" data-optional="" data-complete="">
+        <polyline class="edge" points="590,658 618,658 618,648 636,648" marker-end="url(#head)"/>
+        <rect class="box" x="638" y="624" width="300" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="644" y="638" width="20" height="20"/>
+        <text class="title" x="670" y="645">E · average stake, 7 days</text>
+        <text class="sub" x="670" y="662">union read · event-time OVER</text>
+        <polyline class="edge" points="938,648 986,648" marker-end="url(#head)"/>
       </g>
       <g class="job" data-edge="risk_scoring">
-        <line class="edge" x1="800" y1="80" x2="858" y2="80" marker-end="url(#head)"/>
-        <rect class="box" x="860" y="56" width="240" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="866" y="70" width="20" height="20"/>
-        <text class="title" x="892" y="77">Risk scoring</text>
-        <text class="sub" x="892" y="94">bets ⋈ features · rules</text>
-        <line class="edge" x1="1080" y1="104" x2="1080" y2="148" marker-end="url(#head)"/>
+        <line class="edge" x1="1160" y1="80" x2="1206" y2="80" marker-end="url(#head)"/>
+        <rect class="box" x="1208" y="56" width="240" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="1214" y="70" width="20" height="20"/>
+        <text class="title" x="1240" y="77">Risk scoring</text>
+        <text class="sub" x="1240" y="94">bets ⋈ features · rules</text>
+        <line class="edge" x1="1428" y1="104" x2="1428" y2="148" marker-end="url(#head)"/>
       </g>
-      <text class="edge-label" x="829" y="72" text-anchor="middle">lookup</text>
+      <text class="edge-label" x="1184" y="72" text-anchor="middle">lookup</text>
       <g class="job" data-edge="risk_log">
-        <line class="edge" x1="1080" y1="202" x2="1080" y2="248" marker-end="url(#head)"/>
-        <rect class="box" x="860" y="250" width="240" height="48" rx="6"/>
-        <use class="icon" href="#i-flink" x="866" y="264" width="20" height="20"/>
-        <text class="title" x="892" y="271">Alert log</text>
-        <text class="sub" x="892" y="288">risk_level &lt;&gt; NORMAL</text>
-        <line class="edge" x1="1080" y1="298" x2="1080" y2="342" marker-end="url(#head)"/>
+        <line class="edge" x1="1428" y1="202" x2="1428" y2="248" marker-end="url(#head)"/>
+        <rect class="box" x="1208" y="250" width="240" height="48" rx="6"/>
+        <use class="icon" href="#i-flink" x="1214" y="264" width="20" height="20"/>
+        <text class="title" x="1240" y="271">Alert log</text>
+        <text class="sub" x="1240" y="288">risk_level &lt;&gt; NORMAL</text>
+        <line class="edge" x1="1428" y1="298" x2="1428" y2="342" marker-end="url(#head)"/>
       </g>
-      <line class="edge" x1="800" y1="466" x2="858" y2="466" marker-end="url(#head)"/>
-      <text class="edge-label" x="829" y="458" text-anchor="middle">pyfluss</text>
-      <line class="edge" x1="1100" y1="370" x2="1153" y2="370" marker-end="url(#head)"/>
-      <text class="edge-label" x="1126" y="362" text-anchor="middle">reads</text>
+      <line class="edge" x1="1160" y1="466" x2="1206" y2="466" marker-end="url(#head)"/>
+      <text class="edge-label" x="1184" y="458" text-anchor="middle">pyfluss</text>
+      <line class="edge" x1="1448" y1="370" x2="1497" y2="370" marker-end="url(#head)"/>
+      <text class="edge-label" x="1473" y="362" text-anchor="middle">reads</text>
 
       <!-- Boxes (tables). data-node matches /api/pipeline/status. -->
       <g class="node" data-node="players_cdc">
@@ -444,68 +496,88 @@
         <text class="sub" x="108" y="96" text-anchor="middle">PostgreSQL · CDC</text>
       </g>
       <g class="node" data-node="player_wallets_cdc">
-        <rect class="box" x="23" y="152" width="170" height="52" rx="6"/>
-        <use class="icon" href="#i-postgres" x="29" y="168" width="20" height="20"/>
-        <text class="title" x="108" y="174" text-anchor="middle">player_wallets_cdc</text>
-        <text class="sub" x="108" y="192" text-anchor="middle">PostgreSQL · CDC</text>
+        <rect class="box" x="23" y="146" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-postgres" x="29" y="162" width="20" height="20"/>
+        <text class="title" x="108" y="168" text-anchor="middle">player_wallets_cdc</text>
+        <text class="sub" x="108" y="186" text-anchor="middle">PostgreSQL · CDC</text>
       </g>
-      <g class="node" data-node="bets">
-        <rect class="box" x="23" y="248" width="170" height="52" rx="6"/>
-        <use class="icon" href="#i-kafka" x="29" y="264" width="20" height="20"/>
-        <text class="title" x="108" y="270" text-anchor="middle">bets</text>
-        <text class="sub" x="108" y="288" text-anchor="middle">topic bets</text>
+      <g class="node" data-node="kafka">
+        <rect class="box" x="23" y="260" width="170" height="112" rx="6"/>
+        <use class="icon" href="#i-kafka" x="29" y="276" width="20" height="20"/>
+        <text class="title" x="108" y="282" text-anchor="middle">Kafka topics</text>
+        <text class="sub" x="108" y="300" text-anchor="middle">bets</text>
+        <text class="sub" x="108" y="316" text-anchor="middle">bet_settlements</text>
+        <text class="sub" x="108" y="332" text-anchor="middle">login_events · deposits</text>
       </g>
-      <g class="node" data-node="bet_settlements">
-        <rect class="box" x="23" y="344" width="170" height="52" rx="6"/>
-        <use class="icon" href="#i-kafka" x="29" y="360" width="20" height="20"/>
-        <text class="title" x="108" y="366" text-anchor="middle">bet_settlements</text>
-        <text class="sub" x="108" y="384" text-anchor="middle">topic bet_settlements</text>
+      <g class="node" data-node="fl_bets" data-complete="">
+        <rect class="box" x="418" y="252" width="170" height="48" rx="6"/>
+        <use class="icon" href="#i-db" x="424" y="268" width="20" height="20"/>
+        <text class="title" x="513" y="274" text-anchor="middle">bets</text>
+        <text class="sub" x="513" y="290" text-anchor="middle">log · tiered</text>
       </g>
-      <g class="node" data-node="login_events">
-        <rect class="box" x="23" y="440" width="170" height="52" rx="6"/>
-        <use class="icon" href="#i-kafka" x="29" y="456" width="20" height="20"/>
-        <text class="title" x="108" y="462" text-anchor="middle">login_events</text>
-        <text class="sub" x="108" y="480" text-anchor="middle">topic login_events</text>
+      <g class="node" data-node="fl_settlements" data-complete="">
+        <rect class="box" x="418" y="332" width="170" height="48" rx="6"/>
+        <use class="icon" href="#i-db" x="424" y="348" width="20" height="20"/>
+        <text class="title" x="513" y="354" text-anchor="middle">bet_settlements</text>
+        <text class="sub" x="513" y="370" text-anchor="middle">log · tiered</text>
+      </g>
+      <g class="node" data-node="fl_logins" data-complete="">
+        <rect class="box" x="418" y="412" width="170" height="48" rx="6"/>
+        <use class="icon" href="#i-db" x="424" y="428" width="20" height="20"/>
+        <text class="title" x="513" y="434" text-anchor="middle">login_events</text>
+        <text class="sub" x="513" y="450" text-anchor="middle">log · tiered</text>
+      </g>
+      <g class="node" data-node="fl_deposits" data-complete="">
+        <rect class="box" x="418" y="492" width="170" height="48" rx="6"/>
+        <use class="icon" href="#i-db" x="424" y="508" width="20" height="20"/>
+        <text class="title" x="513" y="514" text-anchor="middle">deposits</text>
+        <text class="sub" x="513" y="530" text-anchor="middle">log · tiered</text>
+      </g>
+      <g class="node" data-node="lake" data-complete="">
+        <rect class="box" x="430" y="634" width="160" height="48" rx="6"/>
+        <use class="icon" href="#i-db" x="436" y="650" width="20" height="20"/>
+        <text class="title" x="518" y="656" text-anchor="middle">Iceberg lake</text>
+        <text class="sub" x="518" y="672" text-anchor="middle">lakehouse</text>
       </g>
       <g class="node" data-node="feature_store">
-        <rect class="box" x="620" y="56" width="180" height="408" rx="6"/>
-        <use class="icon" href="#i-db" x="700" y="200" width="20" height="20"/>
-        <text class="title" x="710" y="244" text-anchor="middle">player_feature_store</text>
-        <text class="sub" x="710" y="262" text-anchor="middle">fluss.betting</text>
-        <text class="sub" x="710" y="286" text-anchor="middle">PK player_id</text>
-        <text class="sub" x="710" y="302" text-anchor="middle">one row per player</text>
-        <text class="sub" x="710" y="318" text-anchor="middle">7 writers, each its</text>
-        <text class="sub" x="710" y="334" text-anchor="middle">own columns</text>
+        <rect class="box" x="988" y="56" width="172" height="610" rx="6"/>
+        <use class="icon" href="#i-db" x="1064" y="270" width="20" height="20"/>
+        <text class="title" x="1074" y="314" text-anchor="middle">player_feature_store</text>
+        <text class="sub" x="1074" y="332" text-anchor="middle">fluss.betting</text>
+        <text class="sub" x="1074" y="356" text-anchor="middle">PK player_id</text>
+        <text class="sub" x="1074" y="372" text-anchor="middle">one row per player</text>
+        <text class="sub" x="1074" y="388" text-anchor="middle">7 writers, each its</text>
+        <text class="sub" x="1074" y="404" text-anchor="middle">own columns</text>
       </g>
       <g class="node" data-node="risk_scores">
-        <rect class="box" x="860" y="150" width="240" height="52" rx="6"/>
-        <use class="icon" href="#i-kafka" x="866" y="166" width="20" height="20"/>
-        <text class="title" x="980" y="172" text-anchor="middle">risk_scores</text>
-        <text class="sub" x="980" y="190" text-anchor="middle">topic risk_scores · every bet</text>
+        <rect class="box" x="1208" y="150" width="240" height="52" rx="6"/>
+        <use class="icon" href="#i-kafka" x="1214" y="166" width="20" height="20"/>
+        <text class="title" x="1328" y="172" text-anchor="middle">risk_scores</text>
+        <text class="sub" x="1328" y="190" text-anchor="middle">topic risk_scores · every bet</text>
       </g>
       <g class="node" data-node="risk_score_log">
-        <rect class="box" x="860" y="344" width="240" height="52" rx="6"/>
-        <use class="icon" href="#i-postgres" x="866" y="360" width="20" height="20"/>
-        <text class="title" x="980" y="366" text-anchor="middle">risk_score_log</text>
-        <text class="sub" x="980" y="384" text-anchor="middle">PostgreSQL · alerts only</text>
+        <rect class="box" x="1208" y="344" width="240" height="52" rx="6"/>
+        <use class="icon" href="#i-postgres" x="1214" y="360" width="20" height="20"/>
+        <text class="title" x="1328" y="366" text-anchor="middle">risk_score_log</text>
+        <text class="sub" x="1328" y="384" text-anchor="middle">PostgreSQL · alerts only</text>
       </g>
       <g class="node" data-node="inference">
-        <rect class="box" x="860" y="440" width="240" height="52" rx="6"/>
-        <use class="icon" href="#i-api" x="866" y="456" width="20" height="20"/>
-        <text class="title" x="980" y="462" text-anchor="middle">Inference service</text>
-        <text class="sub" x="980" y="480" text-anchor="middle">POST /score · :9051</text>
+        <rect class="box" x="1208" y="440" width="240" height="52" rx="6"/>
+        <use class="icon" href="#i-api" x="1214" y="456" width="20" height="20"/>
+        <text class="title" x="1328" y="462" text-anchor="middle">Inference service</text>
+        <text class="sub" x="1328" y="480" text-anchor="middle">POST /score · :9051</text>
       </g>
       <g class="node" data-node="outliner">
-        <rect class="box" x="1155" y="56" width="170" height="52" rx="6"/>
-        <use class="icon" href="#i-bolt" x="1161" y="72" width="20" height="20"/>
-        <text class="title" x="1240" y="78" text-anchor="middle">Outlier generator</text>
-        <text class="sub" x="1240" y="96" text-anchor="middle">BOT_001, GEO_001 … · :9050</text>
+        <rect class="box" x="1499" y="56" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-bolt" x="1505" y="72" width="20" height="20"/>
+        <text class="title" x="1584" y="78" text-anchor="middle">Outlier generator</text>
+        <text class="sub" x="1584" y="96" text-anchor="middle">BOT_001, GEO_001 … · :9050</text>
       </g>
       <g class="node" data-node="grafana">
-        <rect class="box" x="1155" y="344" width="170" height="52" rx="6"/>
-        <use class="icon" href="#i-grafana" x="1161" y="360" width="20" height="20"/>
-        <text class="title" x="1240" y="366" text-anchor="middle">Grafana</text>
-        <text class="sub" x="1240" y="384" text-anchor="middle">Risk pipeline dashboard</text>
+        <rect class="box" x="1499" y="344" width="170" height="52" rx="6"/>
+        <use class="icon" href="#i-grafana" x="1505" y="360" width="20" height="20"/>
+        <text class="title" x="1584" y="366" text-anchor="middle">Grafana</text>
+        <text class="sub" x="1584" y="384" text-anchor="middle">Risk pipeline dashboard</text>
       </g>
 
       <!-- The buttons, drawn by the script below from PILLS -->
@@ -524,12 +596,13 @@
          feeding it runs and the table returns rows. Each button opens its SQL — edit it if you like,
          then run it. The same steps as the README and the editor's Examples menu:</p>
     <ol>
-        <li><b>Create</b> <code>players_cdc</code> and <code>player_wallets_cdc</code>, the CDC sources, and <b>View data</b>. <span class="lab">CDC</span></li>
-        <li><b>Create</b> the Fluss <code>player_feature_store</code>, <b>Deploy</b> Job A and look at the rows it writes. <span class="lab">03</span></li>
-        <li><b>Create</b> <code>bets</code>, then <b>Deploy</b> B1, B2 and B3: windowed bet features. <span class="lab">04</span></li>
-        <li><b>Create</b> <code>bet_settlements</code> and <code>login_events</code>, <b>Deploy</b> C1, C2 and D. <span class="lab">04</span></li>
-        <li><b>Create</b> <code>risk_scores</code>, <b>Deploy</b> Risk scoring: every bet joined with its player's features. <span class="lab">05</span></li>
-        <li><b>Create</b> <code>risk_score_log</code>, <b>Deploy</b> Alert log, fire an outlier and watch it in Grafana. <span class="lab">05</span></li>
+        <li><span data-complete=""><b>Create</b> the Kafka topics and the four Fluss log tables, <b>Deploy</b> Ingest. <span class="lab">01–03</span></span><span data-simple=""><b>Create</b> the Kafka topics: the feature jobs read them directly. <span class="lab">01</span></span></li>
+        <li data-complete=""><b>Start</b> the tiering service; <b>View data</b> on the lake after its first commit. <span class="lab">tiering</span></li>
+        <li><b>Create</b> the CDC sources and the Fluss <code>player_feature_store</code>, <b>Deploy</b> Job A. <span class="lab">04</span></li>
+        <li><b>Deploy</b> B1, B2, B3, C1, C2 and D: per-event features from the <span data-complete="">Fluss logs</span><span data-simple="">Kafka topics</span>. <span class="lab">05</span></li>
+        <li><b>Create</b> <code>risk_scores</code>, <b>Deploy</b> Risk scoring: every bet joined with its player's features. <span class="lab">06</span></li>
+        <li><b>Create</b> <code>risk_score_log</code>, <b>Deploy</b> Alert log, fire an outlier and watch it in Grafana. <span class="lab">06</span></li>
+        <li class="optional" data-complete="">Add a feature: <b>1 · ALTER</b> the store, <b>2 · Deploy</b> job E (it bootstraps from the lake), <b>3 · Use it</b> in scoring, then fire <b>Stake Spike</b>. <span class="lab">08</span></li>
       </ol>
       <div class="legend">
         <span><i class="inactive"></i>not created yet</span>
@@ -602,6 +675,12 @@
 <script>
 const MAX_ROWS = 200;
 const host = location.hostname;
+// Complete mode ingests Kafka into Fluss log tables, tiers them to the lake and adds job E;
+// simple mode (data-mode="simple", set by app.py) reads Kafka directly and has none of
+// them — and no buttons, guide steps or links for them.
+const LAKEHOUSE = document.documentElement.dataset.mode !== "simple";
+const COMPLETE_ONLY = new Set(["ingest", "fl_bets", "fl_settlements", "fl_logins", "fl_deposits",
+                               "tiering", "lake", "jobE", "lakekeeper"]);
 // ── The "Components" menu: every component of the environment, with its icon ────
 // Links are built from the host this page was opened on, like the homepage's, so they
 // work on localhost and on a remote VM alike. Icons: the diagram's own marks (#i-…), plus
@@ -615,10 +694,14 @@ const WORKSHOP = [
   ["Environment home", "Every tool, its status, the connection details", 80, "/", { glyph: "home" }],
   ["Flink SQL editor", "Write and run Flink SQL; the Catalog browser", 8084, "/", { glyph: "code" }],
   ["Flink Web UI", "Running jobs, checkpoints, exceptions", 8081, "/", { mark: "flink" }],
-  ["Redpanda Console", "The topics bets, bet_settlements, login_events, risk_scores", 8082, "/topics", { mark: "kafka" }],
+  ["Redpanda Console", "The topics bets, bet_settlements, login_events, deposits, risk_scores", 8082, "/topics", { mark: "kafka" }],
+  ...(LAKEHOUSE ? [
+  ["Lakekeeper", "The Iceberg REST catalog: the lakehouse warehouse and its tables", 8181, "/ui", { glyph: "db" }],
+  ["MinIO console", "The warehouse bucket the Iceberg files live in (admin / password)", 9001, "/", { glyph: "db" }],
+  ] : []),
   ["Grafana", "The real-time risk pipeline dashboard", 3000, "/dashboards", { mark: "grafana" }],
   ["Inference service", "POST /score: features from Fluss, read with pyfluss", 9051, "/", { glyph: "code" }],
-  ["Outlier generator", "Fire a bot, geo-hopper or loss-streak player", 9050, "/", { glyph: "db" }],
+  ["Outlier generator", "Fire a bot, geo-hopper, loss-streak or stake-spike player", 9050, "/", { glyph: "db" }],
 ];
 $("wmenu").innerHTML = WORKSHOP.map(([name, desc, port, path, icon]) =>
   `<a role="menuitem" target="_blank" rel="noopener" href="${location.protocol}//${host}:${port}${path}">` +
@@ -649,29 +732,39 @@ let guideOn = MODE === "guided", guideStep = null;
 
 // ── Diagram buttons ──────────────────────────────────────────────────────────
 // [x, y, width, label, action, target]. Actions: view / create (a box), deploy (a job),
-// open (a link to another UI).
+// start (the tiering service), alter / upgrade (the optional new feature), open (a link
+// to another UI).
+const LOG_TABLES = ["fl_bets", "fl_settlements", "fl_logins", "fl_deposits"];
+const LOG_Y = { fl_bets: 252, fl_settlements: 332, fl_logins: 412, fl_deposits: 492 };
+const JOB_Y = { jobA: 56, jobB1: 176, jobB2: 236, jobB3: 296, jobC1: 356, jobC2: 416, jobD: 476 };
 const PILLS = [
-  [171, 224, 22, "", "open", "topic_bets"], [171, 320, 22, "", "open", "topic_bet_settlements"],
-  [171, 416, 22, "", "open", "topic_login_events"], [1012, 208, 22, "", "open", "topic_risk_scores"],   // icon buttons
+  [171, 378, 22, "", "open", "topic_all"], [1360, 208, 22, "", "open", "topic_risk_scores"],
+  [568, 688, 22, "", "open", "lakekeeper"],   // icon buttons
   [23, 114, 70, "Create", "create", "players_cdc"],         [99, 114, 70, "View data", "view", "players_cdc"],
-  [23, 210, 70, "Create", "create", "player_wallets_cdc"],  [99, 210, 70, "View data", "view", "player_wallets_cdc"],
-  [23, 306, 70, "Create", "create", "bets"],                [99, 306, 70, "View data", "view", "bets"],
-  [23, 402, 70, "Create", "create", "bet_settlements"],     [99, 402, 70, "View data", "view", "bet_settlements"],
-  [23, 498, 70, "Create", "create", "login_events"],        [99, 498, 70, "View data", "view", "login_events"],
-  ...["jobA", "jobB1", "jobB2", "jobB3", "jobC1", "jobC2", "jobD"].map((e, i) => [490, 70 + 60 * i, 66, "Deploy", "deploy", e]),
-  [628, 474, 78, "Create", "create", "feature_store"],      [714, 474, 78, "View data", "view", "feature_store"],
-  [1028, 70, 66, "Deploy", "deploy", "risk_scoring"],
-  [860, 208, 70, "Create", "create", "risk_scores"],        [936, 208, 70, "View data", "view", "risk_scores"],
-  [1028, 264, 66, "Deploy", "deploy", "risk_log"],
-  [860, 402, 70, "Create", "create", "risk_score_log"],     [936, 402, 70, "View data", "view", "risk_score_log"],
-  [860, 498, 90, "Open", "open", "inference"],
-  [1195, 114, 90, "Open", "open", "outliner"],
-  [1195, 402, 90, "Open", "open", "grafana"],
-];
+  [23, 204, 70, "Create", "create", "player_wallets_cdc"],  [99, 204, 70, "View data", "view", "player_wallets_cdc"],
+  [23, 378, 70, "Create", "create", "kafka"],               [99, 378, 70, "View data", "view", "kafka"],
+  [271, 354, 70, "Deploy", "deploy", "ingest"],
+  ...LOG_TABLES.flatMap(n => [[418, LOG_Y[n] + 54, 70, "Create", "create", n], [494, LOG_Y[n] + 54, 70, "View data", "view", n]]),
+  [238, 688, 80, "Start", "start", "tiering"],              [478, 688, 84, "View data", "view", "lake"],
+  ...Object.entries(JOB_Y).map(([e, y]) => [866, y + 14, 66, "Deploy", "deploy", e]),
+  [638, 680, 92, "1 · ALTER", "alter", "jobE"], [736, 680, 92, "2 · Deploy", "deploy", "jobE"],
+  [834, 680, 104, "3 · Use it", "upgrade", "jobE"],
+  [996, 674, 76, "Create", "create", "feature_store"],      [1080, 674, 76, "View data", "view", "feature_store"],
+  [1376, 70, 66, "Deploy", "deploy", "risk_scoring"],
+  [1208, 208, 70, "Create", "create", "risk_scores"],       [1284, 208, 70, "View data", "view", "risk_scores"],
+  [1376, 264, 66, "Deploy", "deploy", "risk_log"],
+  [1208, 402, 70, "Create", "create", "risk_score_log"],    [1284, 402, 70, "View data", "view", "risk_score_log"],
+  [1208, 498, 90, "Open", "open", "inference"],
+  [1539, 114, 90, "Open", "open", "outliner"],
+  [1539, 402, 90, "Open", "open", "grafana"],
+].filter(p => LAKEHOUSE || !COMPLETE_ONLY.has(p[5]));
 const LINKS = { grafana: [3000, "/d/betting-features-v1"], inference: [9051, "/"], outliner: [9050, "/"],
-                // the sources themselves: the Kafka topics in Redpanda Console
-                topic_bets: [8082, "/topics/bets"], topic_bet_settlements: [8082, "/topics/bet_settlements"],
-                topic_login_events: [8082, "/topics/login_events"], topic_risk_scores: [8082, "/topics/risk_scores"] };
+                // the source systems themselves: the topics in Redpanda Console, the lake in Lakekeeper
+                topic_all: [8082, "/topics"], topic_risk_scores: [8082, "/topics/risk_scores"],
+                lakekeeper: [8181, "/ui"] };
+// The round icon buttons (open a source system), with where they go.
+const SRC_WHERE = { topic_all: "the Kafka topics in Redpanda Console", topic_risk_scores: "the risk_scores topic in Redpanda Console",
+                    lakekeeper: "the lakehouse warehouse in Lakekeeper" };
 const SVGNS = "http://www.w3.org/2000/svg";
 
 function drawPills() {
@@ -682,15 +775,14 @@ function drawPills() {
     p.dataset.action = action; p.dataset.target = target;
     p.innerHTML = `<rect x="${x}" y="${y}" width="${w}" height="20" rx="10"/><text x="${x + w / 2}" y="${y + 14}" text-anchor="middle"></text>`;
     p.querySelector("text").textContent = label;
-    const where = Object.fromEntries(Object.keys(LINKS).filter(k => k.startsWith("topic_"))
-      .map(k => [k, `the ${k.slice(6)} topic in Redpanda Console`]));
+    const where = SRC_WHERE;
     if (where[target]) {   // View source: a round icon button, a magnifying glass, with a tooltip
       p.querySelector("text").remove();
       p.insertAdjacentHTML("beforeend", `<circle class="glyph" cx="${x + 10}" cy="${y + 9}" r="4.2"/><path class="glyph" d="M${x + 13.1} ${y + 12.1} L${x + 16} ${y + 15}"/>`);
       const t = document.createElementNS(SVGNS, "title"); t.textContent = "View source"; p.prepend(t);
       p.setAttribute("aria-label", "View source: " + where[target]); p.classList.add("src");
     }
-    const go = () => { if (!p.classList.contains("off") || action === "view" || action === "deploy") onPill(action, target); };
+    const go = () => { if (!p.classList.contains("off") || ["view", "deploy", "start", "upgrade"].includes(action)) onPill(action, target); };
     p.addEventListener("click", go);
     p.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
     g.append(p);
@@ -708,11 +800,14 @@ function setPill(p, label, cls, aria) {
 // ── Status → diagram ─────────────────────────────────────────────────────────
 const STATE_LABEL = { inactive: "not created", ready: "created", starting: "starting", live: "live",
                       idle: "not deployed", running: "running", failing: "restarting" };
-const NODE_KIND = { players_cdc: "CDC SOURCE", player_wallets_cdc: "CDC SOURCE", bets: "KAFKA SOURCE",
-                    bet_settlements: "KAFKA SOURCE", login_events: "KAFKA SOURCE", feature_store: "FLUSS PK TABLE",
+const NODE_KIND = { kafka: "KAFKA SOURCES", players_cdc: "CDC SOURCE", player_wallets_cdc: "CDC SOURCE",
+                    fl_bets: "FLUSS LOG TABLE", fl_settlements: "FLUSS LOG TABLE", fl_logins: "FLUSS LOG TABLE",
+                    fl_deposits: "FLUSS LOG TABLE", lake: "ICEBERG LAKE", feature_store: "FLUSS PK TABLE",
                     risk_scores: "KAFKA SINK", risk_score_log: "JDBC SINK" };
-const TABLES = Object.keys(NODE_KIND);
-const JOBS = ["jobA", "jobB1", "jobB2", "jobB3", "jobC1", "jobC2", "jobD", "risk_scoring", "risk_log"];
+const TABLES = Object.keys(NODE_KIND).filter(n => LAKEHOUSE || !COMPLETE_ONLY.has(n));
+const JOBS = ["ingest", "jobA", "jobB1", "jobB2", "jobB3", "jobC1", "jobC2", "jobD", "risk_scoring", "risk_log", "jobE"]
+  .filter(e => LAKEHOUSE || !COMPLETE_ONLY.has(e));
+const V2 = "risk-scoring-kafka-v2";
 
 function paint() {
   if (!status) return;
@@ -736,16 +831,35 @@ function paint() {
             exists ? `${NODE_NAME[n]} is created` : `Create ${NODE_NAME[n]}`);
     setPill(pill("view", n), "View data", exists ? "" : "off", `View the data of ${NODE_NAME[n]}`);
   }
+  const added = !!status.feature?.added;
   for (const e of JOBS) {
     const s = status.edges[e];
-    const n = s.jobs.length;
-    if (s.state === "running") setPill(pill("deploy", e), n > 1 ? `● ×${n}` : "● Running", "running", `${NODE_NAME[e]} is running`);
+    const n = s.jobs.length, ready = s.ready && (e !== "jobE" || added);
+    const pre = e === "jobE" ? "2 · " : "";
+    if (s.state === "running") setPill(pill("deploy", e), n > 1 ? `● ×${n}` : `${pre}● Running`, "running", `${NODE_NAME[e]} is running`);
     else if (s.state === "failing") setPill(pill("deploy", e), "! Restart", "failing");
     else if (s.state === "starting") setPill(pill("deploy", e), "… Starting", "running");
-    else setPill(pill("deploy", e), "Deploy", s.ready ? "primary" : "off", s.ready ? `Deploy ${NODE_NAME[e]}` : `Deploy ${NODE_NAME[e]} (create its tables first)`);
+    else setPill(pill("deploy", e), pre + "Deploy", ready ? "primary" : "off",
+                 ready ? `Deploy ${NODE_NAME[e]}` : e === "jobE" ? "Deploy job E (run step 1, the ALTER, first)" : `Deploy ${NODE_NAME[e]} (create its tables first)`);
   }
+  if (LAKEHOUSE) refreshLakePills(added);
   if ($("act").open) refreshDialog();
   guideUpdate();
+}
+
+function refreshLakePills(added) {
+  // The tiering service: one job for every tiered table, started rather than deployed.
+  const ts = status.edges.tiering.state;
+  if (ts === "running") setPill(pill("start", "tiering"), "● Running", "running", "The tiering service is running");
+  else if (ts === "failing") setPill(pill("start", "tiering"), "! Restart", "failing");
+  else if (ts === "starting") setPill(pill("start", "tiering"), "… Starting", "running");
+  else setPill(pill("start", "tiering"), "Start", status.tiering?.available === false ? "off" : "primary", "Start the tiering service");
+  // The optional new feature: step 1 (ALTER) and step 3 (the scoring job with STAKE_SPIKE).
+  setPill(pill("alter", "jobE"), added ? "✓ 1 · ALTER" : "1 · ALTER", added ? "off" : status.nodes.feature_store.exists ? "primary" : "off",
+          added ? "avg_stake_7d is added" : "Add the avg_stake_7d column");
+  const v2 = status.edges.risk_scoring.jobs.some(j => j.name === V2);
+  setPill(pill("upgrade", "jobE"), v2 ? "✓ 3 · In use" : "3 · Use it", v2 ? "running" : status.edges.jobE.state === "running" ? "primary" : "off",
+          v2 ? "Risk scoring reads avg_stake_7d" : "Use avg_stake_7d in risk scoring");
 }
 
 let polling = false, bootstrapping = false, bootstrapError = null, bootstrapRetry = 0;
@@ -809,28 +923,43 @@ async function ensureSession() {
 
 // ── The pop-up ───────────────────────────────────────────────────────────────
 const ABOUT = {
+  kafka: "The four Kafka topics the generators publish to — bets, bet_settlements, login_events and deposits — as tables bets_kafka, bet_settlements_kafka, login_events_kafka and deposits_kafka, read from the earliest offset. Only the ingest job reads them. They live in the session's in-memory catalog: a new session needs them created again.",
   players_cdc: "Every player in PostgreSQL (database betting, table players), read through change data capture: a snapshot first, then every insert, update and delete within a second. Its replication slot flink_cdc_players_slot is pre-created by pg_cdc_setup.sql. It lives in the session's in-memory catalog: a new session needs it created again.",
   player_wallets_cdc: "Every player's wallet in PostgreSQL (player_wallets), through CDC like players_cdc: balance, lifetime deposits and withdrawals. The baseline generator updates balances as settlements pay out, so this stream never goes quiet.",
-  bets: "Every bet the generators publish to the Kafka topic bets: player, stake, bet type, sport and odds, with event_ts as event time and a 2 s watermark. It starts at the latest offset, and proc_time is what the risk-scoring lookup join reads the feature store at.",
-  bet_settlements: "Every settled bet on the topic bet_settlements: win, loss or void, stake and payout. Read from the earliest offset, so the net P&L and loss-streak jobs see the whole history.",
-  login_events: "Every login on the topic login_events, with the country it came from. Logins are rare, which is why 01 sets table.exec.source.idle-timeout: one quiet partition would otherwise hold back every window.",
+  fl_bets: "fluss.betting.bets: a Fluss log table holding every bet, filled from Kafka by the ingest job, with event_ts as event time and a 2 s watermark. Every bet feature and the scoring job read it. Created with 'table.datalake.enabled' = 'true', so the tiering service copies it to Iceberg too.",
+  fl_settlements: "fluss.betting.bet_settlements: every settled bet — win, loss or void, stake and payout — as a tiered Fluss log table. The net P&L and loss-streak jobs read it.",
+  fl_logins: "fluss.betting.login_events: every login, with its country, as a tiered Fluss log table. The geo-mismatch job reads it.",
+  fl_deposits: LAKEHOUSE ? "fluss.betting.deposits: every deposit, as a tiered Fluss log table. No feature reads it yet — it is kept, with its history in Iceberg, for the next feature someone adds."
+                         : "fluss.betting.deposits: every deposit, as a Fluss log table. No feature reads it yet — it is kept for the next feature someone adds.",
+  lake: "The Iceberg copy of the four log tables, in Lakekeeper's lakehouse warehouse on MinIO, committed by the tiering service once per checkpoint (60 s). Reading fluss.betting.bets is a union read — Iceberg plus the Fluss tail — and fluss.betting.`bets$lake` is the Iceberg side alone. It turns green with the first commit.",
   feature_store: "fluss.betting.player_feature_store: a Fluss primary-key table, one row per player, the online feature store. Seven Flink jobs write it, each only its own columns: Fluss merges partial-column upserts into the row. It lives in Fluss itself, so unlike the source tables it survives a new session — Create is CREATE TABLE IF NOT EXISTS.",
   risk_scores: "The Kafka topic risk_scores: one row per bet, with its risk level, the rules it tripped and how long enrichment took. Registering it creates nothing in Kafka — the topic is created by redpanda-init.",
   risk_score_log: "PostgreSQL's public.risk_score_log, through a JDBC table keyed by bet_id, so replays overwrite rather than duplicate. Only alerts (everything but NORMAL) land here; it is what Grafana charts.",
+  ingest: "ingest-kafka-to-fluss: one Flink job — a statement set of four INSERTs — copying the four Kafka topics into the Fluss log tables. Everything downstream reads Fluss, so the history the features are computed from is the history the lake keeps.",
+  tiering: "The Fluss tiering service: one Flink job, shipped as a JAR (fluss-flink-tiering), that tiers every table created with 'table.datalake.enabled' — here the four log tables — to Iceberg through Lakekeeper, committing on each checkpoint. Start runs the JAR start.sh uploaded, with scripts/tiering.args.",
   jobA: "Job A, jobA-cdc-dimensions: joins players_cdc with player_wallets_cdc and writes kyc_tier, balance and lifetime_deposits for every player, and only those columns: a windowed feature stays NULL until the player's first event, which the scoring job and the inference service read as its default. Start it first: it snapshots PostgreSQL before any row reaches Fluss.",
-  jobB1: "Job B1, jobB1-bet-velocity: bets per player over the last 10 minutes, rewritten on every bet by a processing-time OVER window — no window slide to wait for. A second INSERT in the same statement set, a HOP window, resets the feature to 0 once a player has been quiet for 10 minutes. Above 8 = likely bot.",
+  jobB1: "Job B1, jobB1-bet-velocity: bets per player over the last 10 minutes, rewritten on every bet by a processing-time OVER window — no window slide to wait for. " + (LAKEHOUSE ? "It reads fluss.betting.bets from the latest offset: a union read would replay the Iceberg history as if it all happened now." : "It reads the bets topic from the latest offset: replaying the topic would count its history as if it all happened now.") + " A second INSERT, a HOP window, resets the feature to 0 once a player has been quiet for 10 minutes. Above 8 = likely bot.",
   jobB2: "Job B2, jobB2-live-ratio-avg-odds: share of live bets and average odds over 15 minutes. A live ratio above 0.5 is impulsive betting; low average odds with high velocity is a sharp bettor.",
   jobB3: "Job B3, jobB3-stake-sport-variety: total stake and distinct sports over 30 minutes. Above 500 trips the stake limit; four or more sports looks like chasing losses.",
   jobC1: "Job C1, jobC1-net-pnl: the operator's net P&L per player over 30 minutes, from bet_settlements: stakes minus payouts.",
   jobC2: "Job C2, jobC2-loss-streak: MATCH_RECOGNIZE over each player's settlements, pattern L+ W. The streak is written when it ends — 6 or more losses is a responsible-gambling alert.",
   jobD: "Job D, jobD-geo-mismatches: distinct login countries per player over 15 minutes. More than one means the same account logged in from two countries.",
+  jobE: "Job E, jobE-avg-stake-7d (optional, 08_add_feature_avg_stake.sql): a twelfth feature added to the live store. It reads fluss.betting.bets with no startup hint — a union read: the Iceberg history first, then the Fluss log from exactly where Iceberg ends — on event time, so a week of history bootstraps the 7-day average before the job follows live bets. A second INSERT expires it: once a player's last bet is more than 7 days old, avg_stake_7d goes back to NULL (never 0, which would make every next bet a STAKE_SPIKE).",
   risk_scoring: "risk-scoring-kafka: every bet, LEFT JOINed with its player's row in the feature store FOR SYSTEM_TIME AS OF its processing time — a lookup into Fluss, not a state copy — then scored by rules: FRAUD_HIGH, RG_ALERT, SHARP_BETTOR, STAKE_LIMIT or NORMAL, with the rule codes that fired.",
   risk_log: "risk-score-log-postgres: reads the risk_scores topic back, drops NORMAL and upserts the alerts into PostgreSQL. A separate job, so the audit table can be replayed without re-scoring anything.",
 };
-const EDGE_FROM = { jobA: ["players_cdc", "player_wallets_cdc"], jobB1: ["bets"], jobB2: ["bets"], jobB3: ["bets"],
-                    jobC1: ["bet_settlements"], jobC2: ["bet_settlements"], jobD: ["login_events"],
-                    risk_scoring: ["bets", "feature_store"], risk_log: ["risk_scores"] };
-const EDGE_TO = { risk_scoring: "risk_scores", risk_log: "risk_score_log" };
+const ABOUT_ACTION = {
+  "alter:jobE": "Step 1 of adding a feature: ALTER TABLE adds avg_stake_7d to the live feature store. Fluss appends it, nullable, while every writer keeps running — each names only its own columns. Readers see NULL until job E fills it.",
+  "upgrade:jobE": "Step 3: the scoring job of 06 plus avg_stake_7d and a new rule, STAKE_SPIKE — a bet more than 5× the player's own 7-day average. It replaces risk-scoring-kafka (stop that first), under the name risk-scoring-kafka-v2.",
+};
+const EDGE_FROM = { ingest: ["kafka"], tiering: LOG_TABLES, jobA: ["players_cdc", "player_wallets_cdc"],
+                    jobB1: ["fl_bets"], jobB2: ["fl_bets"], jobB3: ["fl_bets"],
+                    jobC1: ["fl_settlements"], jobC2: ["fl_settlements"], jobD: ["fl_logins"],
+                    risk_scoring: ["fl_bets", "feature_store"], risk_log: ["risk_scores"], jobE: ["fl_bets", "lake"] };
+// Simple mode: what reads a Fluss log table reads the Kafka topics instead.
+if (!LAKEHOUSE)
+  for (const e in EDGE_FROM) EDGE_FROM[e] = [...new Set(EDGE_FROM[e].map(n => LOG_TABLES.includes(n) ? "kafka" : n))];
+const EDGE_TO = { ingest: "fl_bets", tiering: "lake", risk_scoring: "risk_scores", risk_log: "risk_score_log" };
 const edgeTo = e => EDGE_TO[e] || "feature_store";
 
 let dlg = null;   // { action, target, defaultSql }
@@ -839,8 +968,9 @@ const editor = CodeMirror.fromTextArea($("actSql"), {
   extraKeys: { "Cmd-Enter": () => primary(), "Ctrl-Enter": () => primary() },
 });
 
-// Which ABOUT text explains a button: the box's own.
-const aboutKey = (action, target) => target;
+// Which ABOUT text explains a button: its own, else the box's.
+const aboutKey = (action, target) => ABOUT_ACTION[`${action}:${target}`] ? `${action}:${target}` : target;
+const aboutText = (action, target) => ABOUT_ACTION[`${action}:${target}`] || ABOUT[target] || "";
 
 function onPill(action, target) {
   guideSeen(action, target);
@@ -853,6 +983,8 @@ function defaultSql(action, target) {
   if (action === "view") return sql.nodes[target]?.view || "";
   if (action === "create") return sql.nodes[target]?.create || "";
   if (action === "deploy") return sql.edges[target]?.sql || "";
+  if (action === "alter") return sql.feature?.alter || "";
+  if (action === "upgrade") return sql.feature?.scoring || "";
   return "";
 }
 
@@ -861,10 +993,13 @@ function openDialog(action, target) {
   dlg = { action, target, defaultSql: defaultSql(action, target) };
   $("actResults").replaceChildren();
   editor.setValue(dlg.defaultSql);
-  $("actTitle").textContent = (action === "view" ? "View data · "
-    : action === "create" ? "Create · " : action === "deploy" ? "Deploy · " : "") + NODE_NAME[target];
-  $("actKind").textContent = action === "deploy" ? "FLINK JOB" : NODE_KIND[target] || "";
-  $("actAbout").textContent = ABOUT[aboutKey(action, target)] || "";
+  $("actTitle").textContent = ({ view: "View data · ", create: "Create · ", deploy: "Deploy · ", start: "Start · ",
+    alter: "Add a feature · step 1 · ", upgrade: "Add a feature · step 3 · " })[action] +
+    (action === "alter" ? "ALTER TABLE" : action === "upgrade" ? "risk-scoring-kafka-v2" : NODE_NAME[target]);
+  $("actKind").textContent = ["deploy", "start", "upgrade"].includes(action) ? "FLINK JOB"
+    : action === "alter" ? "FLUSS PK TABLE" : NODE_KIND[target] || "";
+  $("actAbout").textContent = aboutText(action, target);
+  $("actSqlWrap").hidden = action === "start";   // the tiering service is a JAR, not SQL
   refreshDialog();
   if (!$("act").open) $("act").showModal();
   setTimeout(() => editor.refresh(), 0);
@@ -875,7 +1010,7 @@ function refreshDialog() {
   if (!dlg || !status) return;
   const { action, target } = dlg, notes = [], buttons = [];
   const node = status.nodes[target], edge = status.edges[target];
-  let st = action === "deploy" ? edge?.state : node?.state;
+  let st = action === "deploy" || action === "start" ? edge?.state : action === "alter" ? null : node?.state;
   $("actState").textContent = STATE_LABEL[st] || ""; $("actState").className = "chip " + (st === "running" ? "live" : st || "");
   const jobLink = j => `<a target="_blank" href="${location.protocol}//${host}:8081/#/job/running/${j.jid}/overview">${esc(j.name)} · ${j.jid.slice(0, 8)}</a>`;
   const named = ns => ns.map(n => NODE_NAME[n]).join(" and ");
@@ -893,6 +1028,34 @@ function refreshDialog() {
     if (node?.exists) notes.push([target === "feature_store"
       ? "It exists in Fluss. The CREATE is IF NOT EXISTS, so running it again changes nothing."
       : "It exists in this session. Running the CREATE again fails as a duplicate: DROP it first to change it.", "ok"]);
+  } else if (action === "start") {
+    const t = status.tiering || {};
+    if (edge.jobs.length) {
+      notes.push([`Running: ${edge.jobs.map(jobLink).join(", ")}. It tiers every table created with 'table.datalake.enabled' and commits on each checkpoint (60 s).`, "ok", true]);
+      buttons.push(btn("View the lake", "", () => openDialog("view", "lake")));
+    } else {
+      if (t.available === false) notes.push(["The tiering JAR is not mounted (lib/tiering/): run ./download-jars.sh and restart the sql-editor container.", "err"]);
+      else notes.push([t.deployed ? "Its JAR is uploaded to the JobManager (Submit New Job in the Flink UI). Start runs it with scripts/tiering.args."
+                                  : "Start uploads its JAR to the JobManager, then runs it with scripts/tiering.args.", ""]);
+      notes.push(["From a terminal instead: <code>docker compose exec jobmanager /opt/tiering.sh</code>", "", true]);
+      buttons.push(btn("▶ Start tiering service", "primary", startTiering, t.available === false));
+    }
+  } else if (action === "alter") {
+    const added = !!status.feature?.added, fs = status.nodes.feature_store.exists;
+    if (added) notes.push(["avg_stake_7d is in the table. A second ALTER would fail with \"column already exists\".", "ok"]);
+    else if (!fs) notes.push(["Create the feature store first.", "err"]);
+    else notes.push(["Nothing stops: watch the running jobs in the Flink UI stay green while the column is added.", ""]);
+    buttons.push(btn(added ? "✓ Already added" : "▶ Run ALTER", "primary", () => runSql(editor.getValue()), added || !fs));
+  } else if (action === "upgrade") {
+    const v1 = status.edges.risk_scoring.jobs.filter(j => j.name !== V2), v2 = status.edges.risk_scoring.jobs.filter(j => j.name === V2);
+    if (v2.length) notes.push([`Running: ${v2.map(jobLink).join(", ")}. Fire <b>Stake Spike</b> in the <a target="_blank" href="${location.protocol}//${host}:9050/">outlier generator</a>: its £400 bet scores as STAKE_SPIKE.`, "ok", true]);
+    if (v1.length) {
+      notes.push(["risk-scoring-kafka is still running: stop it first, or every bet is scored twice.", "err"]);
+      for (const j of v1) buttons.push(btn(`■ Stop ${j.jid.slice(0, 8)}`, "danger", () => stopJob(j.jid)));
+    }
+    if (!status.feature?.added) notes.push(["Run step 1 (ALTER) first: this job reads avg_stake_7d.", "err"]);
+    else if (status.edges.jobE.state !== "running") notes.push(["Job E is not running: avg_stake_7d stays NULL, so STAKE_SPIKE never fires.", ""]);
+    if (!v2.length) buttons.push(btn("▶ Deploy job", "primary", () => runSql(editor.getValue()), v1.length > 0 || !status.feature?.added));
   } else if (action === "deploy") {
     const to = edgeTo(target), missing = [...EDGE_FROM[target], to].filter(n => !status.nodes[n].exists);
     if (edge.jobs.length) {
@@ -902,9 +1065,14 @@ function refreshDialog() {
     } else {
       if (missing.length) notes.push([`Create ${named(missing)} first.`, "err"]);
       if (target === "jobA") notes.push(["It snapshots both PostgreSQL tables before the first row reaches Fluss, so give it a few seconds.", ""]);
+      if (target === "jobE" && !status.feature?.added) notes.push(["Run step 1 (ALTER) first: this job writes avg_stake_7d.", "err"]);
+      if (target === "jobE" && status.edges.tiering.state !== "running") notes.push(["The tiering service is not running: the union read has no Iceberg history to start from, only what Fluss still holds.", ""]);
+      if (EDGE_FROM[target].includes("fl_bets") && target !== "jobE" && status.edges.ingest.state === "idle")
+        notes.push(["The ingest job is not running: nothing reaches fluss.betting.bets, so this job sees no events.", ""]);
       if (to === "feature_store" && target !== "jobA" && status.edges.jobA.state === "idle")
         notes.push(["Job A is not running: rows this job writes will have no kyc_tier or balance until it is.", ""]);
-      buttons.push(btn("▶ Deploy job", "primary", () => runSql(editor.getValue()), missing.length > 0));
+      buttons.push(btn("▶ Deploy job", "primary", () => runSql(editor.getValue()),
+                       missing.length > 0 || (target === "jobE" && !status.feature?.added)));
     }
   }
   $("actNotes").replaceChildren(...notes.map(([t, cls, html]) => {
@@ -932,6 +1100,11 @@ $("act").addEventListener("click", e => { if (e.target === $("act")) $("act").cl
 $("act").addEventListener("close", () => { stopRuns(); dlg = null; });
 $("actReset").onclick = () => dlg && editor.setValue(dlg.defaultSql);
 $("actReset").onkeydown = e => { if (e.key === "Enter") $("actReset").click(); };
+
+async function startTiering() {
+  try { await api("/api/tiering/start", {}); } catch (e) { alert(rootCause(e.message)); }
+  setTimeout(poll, 800);
+}
 
 async function stopJob(jid) {
   try { await api(`/api/jobs/${jid}/cancel`, {}); } catch (e) { alert(e.message); }
@@ -1078,7 +1251,7 @@ document.addEventListener("pointerup", () => { for (const g of document.querySel
 // The view is a centre point in diagram units and a zoom factor relative to "fit"; the
 // SVG's viewBox is derived from it and the stage's size, so a resize keeps the zoom.
 const stage = $("stage"), svg = $("diagram");
-const CONTENT = { x: 0, y: 0, w: 1350, h: 540 }, MARGIN = 24, ZMIN = 0.5, ZMAX = 4;
+const CONTENT = { x: 0, y: 0, w: 1690, h: 720 }, MARGIN = 24, ZMIN = 0.5, ZMAX = 4;
 let view = { cx: CONTENT.w / 2, cy: CONTENT.h / 2, z: 1 };
 let atFit = true;   // still showing the fitted view: re-fit on resize or when the panel changes
 // Where "fit" puts the diagram: the stage, minus the steps panel's column while the panel
@@ -1249,62 +1422,73 @@ if (stepsPos?.collapsed) setCollapsed(true);
 // is done once its pop-up was opened, remembered per session. On or off from the header or
 // the URL (?mode=guided | ?mode=explore).
 const GUIDE = [
-  { a: "create", t: "players_cdc", li: 0, lab: "CDC", title: "Register the players table (CDC)",
-    what: "Describes PostgreSQL's <b>players</b> table to Flink as <b>players_cdc</b>, a <b>postgres-cdc</b> source: a snapshot, then every change from the write-ahead log. Nothing is read yet — a table is only a definition.",
+  { a: "create", t: "kafka", li: 0, lab: "01", title: "Register the Kafka topics",
+    what: "Describes the four topics — bets, bet_settlements, login_events, deposits — to Flink as tables, with <b>event_ts</b> as event time. Nothing is read yet: a table is only a definition.",
+    look: "The box turns green: the generators have been publishing all along.",
+    done: s => s.nodes.kafka.exists },
+  ...[["fl_bets", "bets"], ["fl_settlements", "bet_settlements"], ["fl_logins", "login_events"], ["fl_deposits", "deposits"]].map(([n, t]) => (
+  { a: "create", t: n, li: 0, lab: "02", title: `Create the Fluss log table ${t}`,
+    what: LAKEHOUSE ? `<b>fluss.betting.${t}</b>: a Fluss log table, then <b>'table.datalake.enabled' = 'true'</b> on it, so the tiering service will copy it to Iceberg.`
+                    : `<b>fluss.betting.${t}</b>: a Fluss log table, the event stream the feature jobs read.`,
+    look: "The box turns solid.",
+    done: s => s.nodes[n].exists })),
+  { a: "deploy", t: "ingest", li: 0, lab: "03", title: "Deploy the ingest job",
+    what: "One Flink job, four INSERTs: every topic copied into its Fluss log table. From here on everything reads Fluss, not Kafka.",
+    look: "The four log tables go amber, then green as rows arrive.",
+    done: s => s.edges.ingest.state === "running",
+    until: s => s.nodes.fl_bets.state === "live", wait: "fluss.betting.bets turns green once the ingest job has written its first rows." },
+  { a: "view", t: "fl_bets", li: 0, lab: "03", title: "Watch bets land in Fluss",
+    what: "A streaming read of fluss.betting.bets from the latest offset.",
+    look: "A new row every second or two." },
+  { a: "start", t: "tiering", li: 1, lab: "tiering", title: "Start the tiering service",
+    what: "One Flink job that tiers every table with datalake enabled to Iceberg, through Lakekeeper, committing on each checkpoint (60 s).",
+    look: "The tiering box turns green; the lake follows with its first commit.",
+    done: s => s.edges.tiering.state === "running",
+    until: s => s.nodes.lake.state === "live", wait: "The lake turns green with the first Iceberg commit — about a minute after the tiering service starts." },
+  { a: "view", t: "lake", li: 1, lab: "07", title: "Compare the lake with the union read",
+    what: "Counts bets in Iceberg alone (<b>bets$lake</b>) against the union read of fluss.betting.bets.",
+    look: "The lake trails by about one checkpoint; the union read is always complete." },
+  { a: "create", t: "players_cdc", li: 2, lab: "CDC", title: "Register the players table (CDC)",
+    what: "Describes PostgreSQL's <b>players</b> table to Flink as <b>players_cdc</b>, a <b>postgres-cdc</b> source: a snapshot, then every change from the write-ahead log.",
     look: "The box turns green.",
     done: s => s.nodes.players_cdc.exists },
-  { a: "create", t: "player_wallets_cdc", li: 0, lab: "CDC", title: "Register the wallets table (CDC)",
+  { a: "create", t: "player_wallets_cdc", li: 2, lab: "CDC", title: "Register the wallets table (CDC)",
     what: "The same for <b>player_wallets</b>: balance and lifetime deposits, the dimensions the risk rules read next to the windowed features.",
     look: "The box turns green.",
     done: s => s.nodes.player_wallets_cdc.exists },
-  { a: "view", t: "player_wallets_cdc", li: 0, lab: "CDC", title: "Watch a balance change arrive",
-    what: "A streaming read through a replication slot of its own. Leave it open and run the UPDATE shown in the pop-up.",
-    look: "BOT_001's row changes within a second: CDC, no polling." },
-  { a: "create", t: "feature_store", li: 1, lab: "02", title: "Create the online feature store",
+  { a: "create", t: "feature_store", li: 2, lab: "02", title: "Create the online feature store",
     what: "<b>fluss.betting.player_feature_store</b>: a Fluss primary-key table, one row per player, every feature a column. It lives in Fluss, not in the session.",
     look: "The tall Fluss box turns solid.",
     done: s => s.nodes.feature_store.exists },
-  { a: "deploy", t: "jobA", li: 1, lab: "03", title: "Deploy Job A · CDC dimensions",
+  { a: "deploy", t: "jobA", li: 2, lab: "04", title: "Deploy Job A · CDC dimensions",
     what: "Joins players with wallets and writes kyc_tier, balance and lifetime_deposits for every player — only those columns; the windowed jobs fill the rest.",
     look: "Job A's arrows turn green; the feature store goes amber, then green when rows are confirmed.",
     done: s => s.edges.jobA.state === "running",
     until: s => s.nodes.feature_store.state === "live", wait: "The feature store turns green once Job A has snapshotted PostgreSQL and written its first rows." },
-  { a: "view", t: "feature_store", li: 1, lab: "03", title: "Look inside the feature store",
+  { a: "view", t: "feature_store", li: 2, lab: "04", title: "Look inside the feature store",
     what: "A bounded read of the Fluss table: 200 current rows, one per player.",
-    look: "One row per player: dimensions filled in, windowed features still 0." },
-  { a: "create", t: "bets", li: 2, lab: "01", title: "Register the bets topic",
-    what: "Describes the Kafka topic <b>bets</b> as a table, with <b>event_ts</b> as event time and <b>proc_time</b> for the lookup join later.",
-    look: "The box turns green: the generators have been publishing all along.",
-    done: s => s.nodes.bets.exists },
-  { a: "deploy", t: "jobB1", li: 2, lab: "04", title: "Deploy B1 · bet velocity",
-    what: "Bets per player over the last 10 minutes, rewritten on <b>every bet</b> by an <b>OVER window</b>; a HOP window in the same job resets a quiet player to 0.",
+    look: "One row per player: dimensions filled in, windowed features still empty." },
+  { a: "deploy", t: "jobB1", li: 3, lab: "05", title: "Deploy B1 · bet velocity",
+    what: "Bets per player over the last 10 minutes, rewritten on <b>every bet</b> by an <b>OVER window</b> over " + (LAKEHOUSE ? "fluss.betting.bets" : "the bets topic") + "; a HOP window in the same job resets a quiet player to 0.",
     look: "The job box turns green.",
     done: s => s.edges.jobB1.state === "running" },
-  { a: "deploy", t: "jobB2", li: 2, lab: "04", title: "Deploy B2 · live ratio and average odds",
+  { a: "deploy", t: "jobB2", li: 3, lab: "05", title: "Deploy B2 · live ratio and average odds",
     what: "Two features from one 15-minute window, written to their own two columns of the same row.",
     look: "The job box turns green.",
     done: s => s.edges.jobB2.state === "running" },
-  { a: "deploy", t: "jobB3", li: 2, lab: "04", title: "Deploy B3 · stake and sport variety",
+  { a: "deploy", t: "jobB3", li: 3, lab: "05", title: "Deploy B3 · stake and sport variety",
     what: "Total stake and distinct sports over 30 minutes.",
     look: "Three jobs now write the same Fluss row, none of them touching another's columns.",
     done: s => s.edges.jobB3.state === "running" },
-  { a: "create", t: "bet_settlements", li: 3, lab: "01", title: "Register the settlements topic",
-    what: "Win, loss or void for every bet, read from the earliest offset.",
-    look: "The box turns green.",
-    done: s => s.nodes.bet_settlements.exists },
-  { a: "deploy", t: "jobC1", li: 3, lab: "04", title: "Deploy C1 · net P&L",
-    what: "Stakes minus payouts per player over 30 minutes.",
+  { a: "deploy", t: "jobC1", li: 3, lab: "05", title: "Deploy C1 · net P&L",
+    what: "Stakes minus payouts per player over 30 minutes, from fluss.betting.bet_settlements.",
     look: "The job box turns green.",
     done: s => s.edges.jobC1.state === "running" },
-  { a: "deploy", t: "jobC2", li: 3, lab: "04", title: "Deploy C2 · loss streak",
+  { a: "deploy", t: "jobC2", li: 3, lab: "05", title: "Deploy C2 · loss streak",
     what: "<b>MATCH_RECOGNIZE</b> with pattern <b>L+ W</b>: a run of losses closed by a win. Event-driven, not windowed.",
     look: "The job box turns green.",
     done: s => s.edges.jobC2.state === "running" },
-  { a: "create", t: "login_events", li: 3, lab: "01", title: "Register the logins topic",
-    what: "Every login with its country.",
-    look: "The box turns green.",
-    done: s => s.nodes.login_events.exists },
-  { a: "deploy", t: "jobD", li: 3, lab: "04", title: "Deploy D · geo mismatches",
+  { a: "deploy", t: "jobD", li: 3, lab: "05", title: "Deploy D · geo mismatches",
     what: "Distinct login countries per player over 15 minutes: more than one is the same account in two places.",
     look: "All seven feature jobs run.",
     done: s => s.edges.jobD.state === "running" },
@@ -1312,37 +1496,40 @@ const GUIDE = [
     what: "The Kafka sink for scored bets.",
     look: "The box turns solid.",
     done: s => s.nodes.risk_scores.exists },
-  { a: "deploy", t: "risk_scoring", li: 4, lab: "05", title: "Deploy Risk scoring",
-    what: "Each bet looks up its player's row <b>FOR SYSTEM_TIME AS OF</b> its processing time — a point lookup into Fluss — and is scored by rules.",
+  { a: "deploy", t: "risk_scoring", li: 4, lab: "06", title: "Deploy Risk scoring",
+    what: "Each new bet looks up its player's row <b>FOR SYSTEM_TIME AS OF</b> its processing time — a point lookup into Fluss — and is scored by rules.",
     look: "risk_scores turns green.",
     done: s => s.edges.risk_scoring.state === "running" },
-  { a: "view", t: "risk_scores", li: 4, lab: "05", title: "Watch bets being scored",
+  { a: "view", t: "risk_scores", li: 4, lab: "06", title: "Watch bets being scored",
     what: "A streaming read of the risk_scores topic, from now on.",
     look: "Mostly NORMAL; enrichment_lag_ms shows how fresh the features were." },
   { a: "create", t: "risk_score_log", li: 5, lab: "01", title: "Register the alert table",
     what: "The JDBC table for PostgreSQL's risk_score_log, keyed by bet_id.",
     look: "The box turns solid.",
     done: s => s.nodes.risk_score_log.exists },
-  { a: "deploy", t: "risk_log", li: 5, lab: "05", title: "Deploy Alert log",
+  { a: "deploy", t: "risk_log", li: 5, lab: "06", title: "Deploy Alert log",
     what: "Reads risk_scores back, drops NORMAL and upserts the alerts into PostgreSQL.",
     look: "The job box turns green; risk_score_log follows once an alert is written.",
     done: s => s.edges.risk_log.state === "running",
     until: s => s.nodes.risk_score_log.state === "live", wait: "risk_score_log turns green with the first alert — fire an outlier to make one now." },
   { a: "open", t: "outliner", li: 5, lab: "datagen", title: "Fire an outlier",
-    what: "The outlier generator's buttons publish a burst for one player: <b>BOT</b> (20 bets in 10 minutes), <b>GEO</b> (logins from two countries), a loss streak…",
+    what: "The outlier generator's buttons publish a burst for one player: <b>BOT</b> (25 bets in 2 minutes), <b>GEO</b> (logins from two countries), a loss streak…",
     look: "Within seconds the player's features cross a threshold and their next bet scores as an alert." },
-  { a: "view", t: "risk_score_log", li: 5, lab: "05", title: "Find the alert",
+  { a: "view", t: "risk_score_log", li: 5, lab: "06", title: "Find the alert",
     what: "A bounded read of risk_score_log, newest first.",
     look: "BOT_001 as FRAUD_HIGH with BOT_VELOCITY, GEO_001 with GEO_MISMATCH." },
   { a: "open", t: "grafana", li: 5, lab: "Grafana", title: "Open the dashboard",
     what: "Grafana's Betting Features — Real-Time Risk Pipeline, reading risk_score_log.",
     look: "Alerts by level and rule, and the pipeline's latency over time." },
-];
+].filter(g => LAKEHOUSE || !COMPLETE_ONLY.has(g.t));
 // What each kind of button does, for the hover explanations.
 const ACTION_TIP = {
   create: "Opens the CREATE statement. Edit it if you like, then run it.",
   view: "Opens a query and shows its rows live. Closing the pop-up cancels the query.",
   deploy: "Opens the job's INSERT INTO statement; Deploy submits it as a long-running Flink job.",
+  start: "Starts the tiering service: a Flink job run from its JAR, not from SQL.",
+  alter: "Opens the ALTER TABLE statement that adds the new column.",
+  upgrade: "Opens the scoring job that uses the new feature; Deploy replaces the running one.",
   open: "Opens this tool in a new tab.",
 };
 const NODE_TIP = {
@@ -1350,8 +1537,10 @@ const NODE_TIP = {
   inference: ["Inference service", "A Python service that answers POST /score with the player's features, read from the same Fluss table with pyfluss: the online feature store serving outside Flink."],
   outliner: ["Outlier generator", "A web page that publishes a burst of suspicious events for one player (BOT_001, GEO_001, …) to the same Kafka topics."],
 };
-const NODE_NAME = { players_cdc: "players_cdc", player_wallets_cdc: "player_wallets_cdc", bets: "bets",
-  bet_settlements: "bet_settlements", login_events: "login_events", feature_store: "fluss · player_feature_store",
+const NODE_NAME = { kafka: "the Kafka topics", players_cdc: "players_cdc", player_wallets_cdc: "player_wallets_cdc",
+  fl_bets: "fluss · bets", fl_settlements: "fluss · bet_settlements", fl_logins: "fluss · login_events",
+  fl_deposits: "fluss · deposits", lake: "the Iceberg lake", feature_store: "fluss · player_feature_store",
+  ingest: "ingest-kafka-to-fluss", tiering: "the tiering service", jobE: "jobE-avg-stake-7d",
   risk_scores: "risk_scores", risk_score_log: "risk_score_log",
   jobA: "jobA-cdc-dimensions", jobB1: "jobB1-bet-velocity", jobB2: "jobB2-live-ratio-avg-odds",
   jobB3: "jobB3-stake-sport-variety", jobC1: "jobC1-net-pnl", jobC2: "jobC2-loss-streak", jobD: "jobD-geo-mismatches",
@@ -1391,7 +1580,7 @@ function guideUpdate() {
   if (!guideStep) {
     $("guide").innerHTML = `<div class="ghead">Guide<span class="spacer"></span><button type="button" data-g="off" title="Turn the guide off" aria-label="Turn the guide off">✕</button></div>
       <h3>✓ The whole pipeline is built</h3>
-      <p>Bets, settlements and logins flow from Kafka and PostgreSQL through seven Flink jobs into one Fluss row per player; every new bet looks that row up, is scored, and alerts land in PostgreSQL and Grafana. Every box and job still explains itself on hover.</p>${waitHtml}
+      <p>${LAKEHOUSE ? "Events flow from Kafka into Fluss log tables, tiered to Iceberg for history; seven" : "Seven"} Flink jobs turn ${LAKEHOUSE ? "them" : "the Kafka events"} and PostgreSQL's dimensions into one Fluss row per player; every new bet looks that row up, is scored, and alerts land in PostgreSQL and Grafana.${LAKEHOUSE ? " Next: <b>add a feature</b> — the dashed box under the feature jobs." : ""}</p>${waitHtml}
       <div class="gact"><a data-g="restart" role="button" tabindex="0">Start the guide again</a></div>${bar}`;
   } else {
     const g = guideStep;
@@ -1407,7 +1596,8 @@ function guideUpdate() {
   $("guide").hidden = false;
   guidePlace();
 }
-const pillLabel = g => ({ create: "Create", view: "View data", deploy: "Deploy", open: "Open" })[g.a];
+const pillLabel = g => ({ create: "Create", view: "View data", deploy: "Deploy", open: "Open", start: "Start",
+                          alter: "ALTER", upgrade: "Use it" })[g.a];
 
 // The callout goes where it hides the least: in the free space above or below the diagram,
 // clear of the Suggested steps panel, and only next to the button itself when there is no
@@ -1492,7 +1682,7 @@ function tipFor(el) {
     const { action, target } = pl.dataset;
     if (pl.classList.contains("src")) return [pl.getAttribute("aria-label"), "Opens the source system itself, outside Flink."];
     const name = NODE_NAME[target] || NODE_TIP[target]?.[0] || target;
-    const about = ABOUT[aboutKey(action, target)] || NODE_TIP[target]?.[1] || "";
+    const about = aboutText(action, target) || NODE_TIP[target]?.[1] || "";
     return [`${pillLabel({ a: action, t: target })} · ${name}`, `<span class="act">${ACTION_TIP[action]}</span> ${about}`];
   }
   const node = el.closest(".node[data-node]"), job = el.closest(".job[data-edge]");

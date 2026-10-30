@@ -10,6 +10,8 @@
 #   LIVE    — LIVE_001:   90% live bets → HIGH_LIVE_RATIO
 #   SHARP   — SHARP_001:  consistently odds < 2 → SHARP_ODDS_PATTERN
 #   LIMIT   — LIMIT_001:  £7 000 staked in one session → DAILY_LIMIT
+#   SPIKE   — SPIKE_001:  3 small bets, then one 40× larger → STAKE_SPIKE (needs the
+#             optional avg_stake_7d feature, flink_sql/08_add_feature_avg_stake.sql)
 
 import configparser
 import json
@@ -47,7 +49,7 @@ PG_PASS = config["POSTGRES"]["password"]
 # ── Shared state ───────────────────────────────────────────────────────────────
 _log_listeners: list[queue.Queue] = []
 _log_lock       = threading.Lock()
-_running: dict[str, bool] = {k: False for k in ["BOT", "GEO", "STREAK", "LIVE", "SHARP", "LIMIT"]}
+_running: dict[str, bool] = {k: False for k in ["BOT", "GEO", "STREAK", "LIVE", "SHARP", "LIMIT", "SPIKE"]}
 
 producer = None  # initialised in main()
 
@@ -121,6 +123,7 @@ OUTLINER_PLAYERS = [
     {"player_id": "LIVE_001",   "username": "live_addict_001",   "kyc_tier": "BASIC",    "country": "ES"},
     {"player_id": "SHARP_001",  "username": "sharp_bettor_001",  "kyc_tier": "ENHANCED", "country": "GB"},
     {"player_id": "LIMIT_001",  "username": "high_roller_001",   "kyc_tier": "ENHANCED", "country": "AU"},
+    {"player_id": "SPIKE_001",  "username": "spiky_staker_001",  "kyc_tier": "STANDARD", "country": "IE"},
 ]
 
 def seed_outliners():
@@ -251,6 +254,24 @@ def run_limit():
     log("=== LIMIT_001 done — DAILY_LIMIT triggered ===")
 
 
+def run_spike():
+    """SPIKE_001: 3 bets of ~£10 set the player's norm, then one £400 bet → STAKE_SPIKE.
+    Only fires once the optional avg_stake_7d feature exists (08_add_feature_avg_stake.sql).
+    Run it once BEFORE deploying job E too: those bets are then history, read back from
+    Iceberg by job E's union read. Kept to 4 bets a run so two runs within 10 minutes
+    stay at 8 bets — under BOT_VELOCITY's "more than 8", which would outrank the alert.
+    """
+    log("=== SPIKE_001 — 3 small bets, then a £400 one ===")
+    send_login("SPIKE_001", "IE")
+    for _ in range(3):
+        send_bet("SPIKE_001", amount=round(random.uniform(8, 12), 2), bet_type="single",
+                 sport="football", odds=round(random.uniform(2.0, 3.0), 2))
+        time.sleep(5)
+    time.sleep(10)   # let avg_stake_7d settle on the small bets first
+    send_bet("SPIKE_001", amount=400.00, bet_type="single", sport="football", odds=2.50)
+    log("=== SPIKE_001 done — STAKE_SPIKE expected on the £400 bet ===")
+
+
 ARCHETYPES = {
     "BOT":    run_bot,
     "GEO":    run_geo,
@@ -258,6 +279,7 @@ ARCHETYPES = {
     "LIVE":   run_live,
     "SHARP":  run_sharp,
     "LIMIT":  run_limit,
+    "SPIKE":  run_spike,
 }
 
 ARCHETYPE_META = {
@@ -267,6 +289,7 @@ ARCHETYPE_META = {
     "LIVE":   {"label": "Live Bet Addict",      "player": "LIVE_001",   "rule": "HIGH_LIVE_RATIO",   "desc": "10 of 12 bets are live (83% ratio), one bet every 8–10 s — triggers RG_ALERT in ~1 min"},
     "SHARP":  {"label": "Sharp Bettor",         "player": "SHARP_001",  "rule": "SHARP_ODDS_PATTERN","desc": "8 bets at odds < 2 placed 3–5 s apart — triggers SHARP_BETTOR in ~40 s"},
     "LIMIT":  {"label": "Stake Limit Breach",   "player": "LIMIT_001",  "rule": "DAILY_LIMIT",       "desc": "£7 000 staked in a single session"},
+    "SPIKE":  {"label": "Stake Spike",          "player": "SPIKE_001",  "rule": "STAKE_SPIKE",       "desc": "3 bets of ~£10, then one of £400 — STAKE_SPIKE, once the optional avg_stake_7d feature is added"},
 }
 
 

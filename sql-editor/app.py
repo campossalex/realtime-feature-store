@@ -19,6 +19,7 @@ Unlike the coffee-shop editor this was ported from, the SQL files here carry no
 ${PLACEHOLDERS} (hosts and credentials are written in), so statements go to the gateway
 exactly as typed.
 """
+import glob
 import json
 import os
 import re
@@ -33,11 +34,21 @@ FLINK = os.environ.get("FLINK_URL", "http://jobmanager:8081").rstrip("/")
 SQL_DIR = os.environ.get("SQL_DIR", "/opt/sql")
 BUILTIN_CATALOG = "default_catalog"
 PRELOAD_DDL = os.environ.get("PRELOAD_DDL", "false").lower() in ("1", "true", "yes")
+# Complete mode (start.sh, via .env): Kafka is ingested into Fluss log tables that the
+# feature jobs read, the lake, the tiering service and the new feature exist. Simple mode
+# has none of them — its jobs read the Kafka topics — and the editor leaves them out.
+LAKEHOUSE = os.environ.get("LAKEHOUSE", "1") == "1"
 
 SOURCES_FILE = "01_sources_and_catalogs.sql"
 STORE_FILE = "02_fluss_feature_store.sql"
-JOB_FILES = ["03_cdc_dimensions.sql", "04_feature_calculations.sql", "05_risk_scoring_inference.sql"]
-QUERIES_FILE = "06_analytics_and_monitoring.sql"
+INGEST_FILE = "03_ingest_to_fluss.sql"          # complete mode only, with the log tables
+FEATURE_FILE = "08_add_feature_avg_stake.sql"   # the new feature, complete mode only
+JOB_FILES = ([INGEST_FILE] if LAKEHOUSE else []) + [
+    "04_cdc_dimensions.sql", "05_feature_calculations.sql", "06_risk_scoring_inference.sql"] + (
+    [FEATURE_FILE] if LAKEHOUSE else [])
+QUERIES_FILE = "07_analytics_and_monitoring.sql"
+TIERING_JAR_DIR = os.environ.get("TIERING_JAR_DIR", "/opt/tiering")
+TIERING_ARGS = os.environ.get("TIERING_ARGS", "/opt/tiering.args")
 
 app = Flask(__name__, static_folder="static")
 
@@ -53,7 +64,7 @@ def split_statements(sql):
     A character scanner rather than str.split: string literals can hold `;` or `--`,
     and 01_sources_and_catalogs.sql puts `--` comments inside WITH (...) clauses.
     An `EXECUTE STATEMENT SET BEGIN ... END;` stays one statement: the `;` after each
-    INSERT inside it does not end it (04_feature_calculations.sql uses them).
+    INSERT inside it does not end it (05_feature_calculations.sql uses them).
     """
     out, buf, i, n = [], [], 0, len(sql)
     while i < n:
@@ -148,26 +159,44 @@ def section(rel, prefix):
     raise KeyError(f"no '{prefix}' section in {rel}")
 
 
-def job_blocks():
+# The Iceberg catalog left 01 (it would fail without Lakekeeper); complete mode adds it
+# back to everything that stands in for `sql-client.sh --init`.
+if LAKEHOUSE:
+    DDL += split_statements(section(QUERIES_FILE, "Iceberg catalog"))
+
+# Simple mode: the jobs' event views read the Kafka topics, not the Fluss log tables. The
+# one FROM line each view has is swapped — the same swap as scripts/kafka-sources.sh,
+# which start.sh uses; see 05_feature_calculations.sql.
+KAFKA_SOURCE = (re.compile(r"FROM fluss\.betting\.(\w+) /\*\+ OPTIONS\('scan\.startup\.mode' = 'latest'\) \*/"),
+                r"FROM \1_kafka /*+ OPTIONS('scan.startup.mode' = 'latest-offset') */")
+
+
+def event_source(sql):
+    return sql if LAKEHOUSE else KAFKA_SOURCE[0].sub(KAFKA_SOURCE[1], sql)
+
+
+def job_blocks(with_file=False):
     """Every job in the job files, in file order: [(pipeline.name, banner title, sql)].
-    Each job sits in a banner section of its own holding exactly one SET 'pipeline.name'."""
+    Each job sits in a banner section of its own holding exactly one SET 'pipeline.name'
+    (and whatever it needs before it, such as a temporary view)."""
     jobs = []
     for rel in JOB_FILES:
         for title, body in load_sections(rel):
             m = PIPELINE_NAME.search(body)
             if m:
-                body = body[:m.start()] + CHECKPOINTING + body[m.start():]
-                jobs.append((m.group(1), title, f"-- {title}\n{body}"))
+                body = event_source(body[:m.start()] + CHECKPOINTING + body[m.start():])
+                job = (m.group(1), title, f"-- {title}\n{body}")
+                jobs.append(job + (rel,) if with_file else job)
     return jobs
 
 
-def create_table(name):
-    """One CREATE TABLE of 01_sources_and_catalogs.sql, with the comment lines just above
-    it. 01 groups several tables under one banner, so a banner section is too coarse."""
-    text = read_sql(SOURCES_FILE)
-    m = re.search(rf"^CREATE TABLE {re.escape(name)} \(.*?^\);\n", text, re.S | re.M)
+def create_table(name, rel=SOURCES_FILE):
+    """One CREATE TABLE of a DDL file, with the comment lines just above it. 01 and 02
+    group several tables under one banner, so a banner section is too coarse."""
+    text = read_sql(rel)
+    m = re.search(rf"^CREATE TABLE (?:IF NOT EXISTS )?{re.escape(name)} \(.*?^\);\n", text, re.S | re.M)
     if not m:
-        raise KeyError(f"no CREATE TABLE {name} in {SOURCES_FILE}")
+        raise KeyError(f"no CREATE TABLE {name} in {rel}")
     lines = text[:m.start()].splitlines()
     comments = []
     while lines and lines[-1].startswith("--") and not BANNER.match(lines[-1]):
@@ -175,30 +204,77 @@ def create_table(name):
     return "\n".join(comments + [m.group(0)])
 
 
+def chunk_title(sql):
+    """The first line of the last comment block before the first SQL line: the comment
+    that describes this query, not a section introduction further up."""
+    block, last = [], None
+    for line in sql.splitlines():
+        if line.startswith("--"):
+            block.append(line[2:].strip())
+        elif line.strip():
+            return (block or [last])[0] if (block or last) else None
+        else:
+            if block:
+                last = block[0]
+            block = []
+    return None
+
+
+SET_STMT = re.compile(r"^\s*SET\s", re.I)
+BATCH_MODE = re.compile(r"'execution\.runtime-mode'\s*=\s*'batch'", re.I)
+
+
 def query_chunks(rel):
-    """06's queries one by one: each statement with the comment lines above it, titled
-    by the first of them."""
+    """07's queries one by one: each statement with the comment lines above it, titled
+    by the first of them. A SET before a query belongs to it (07 runs its point-in-time
+    queries in batch mode), and a query run in batch mode is followed by the switch back
+    to streaming, so picking one example never leaves the session in batch mode."""
     out = []
     for title, body in load_sections(rel):
+        carry = ""
         for chunk in re.split(r";[ \t]*\n", body):
-            if not split_statements(chunk):
+            stmts = split_statements(chunk)
+            if not stmts:
                 continue   # only comments (the section's trailing notes)
             chunk = chunk.strip() + ";\n"
-            first = next((l[2:].strip() for l in chunk.splitlines() if l.startswith("--")), title)
+            if SET_STMT.match(stmts[0]):
+                carry += chunk
+                continue
+            sql = carry + chunk
+            first = chunk_title(sql) or title
             if len(first) > 60:
                 first = first[:57].rstrip() + "…"
-            out.append({"group": "Queries", "title": f"{title}: {first}", "sql": chunk})
+            if BATCH_MODE.search(carry):
+                sql += "SET 'execution.runtime-mode' = 'streaming';\n"
+            out.append({"group": "Queries", "title": f"{title}: {first}", "sql": sql})
+            carry = ""
     return out
 
 
 def load_examples():
     """In pipeline order: the DDL files, then every job (one entry per pipeline.name),
-    then 06's analytics queries one at a time."""
+    then 07's analytics queries one at a time. The new-feature walkthrough (08) comes
+    last, as its own group: its ALTER, then its two jobs. Simple mode has no lake, so it
+    leaves out 03, 07's lake queries and 08."""
     examples = [{"group": "DDL", "title": rel, "sql": read_sql(rel)} for rel in (SOURCES_FILE, STORE_FILE)]
-    examples += [{"group": "Jobs", "title": f"{name} — {title}", "sql": sql.rstrip() + "\n" + RESET_NAME}
-                 for name, title, sql in job_blocks()]
-    examples += query_chunks(QUERIES_FILE)
+    if LAKEHOUSE:
+        examples.append({"group": "DDL", "title": f"{INGEST_FILE} — the Fluss log tables",
+                         "sql": section(INGEST_FILE, "Event log tables")})
+    jobs = [{"title": f"{name} — {title}", "sql": sql.rstrip() + "\n" + RESET_NAME, "rel": rel}
+            for name, title, sql, rel in job_blocks(with_file=True)]
+    examples += [{"group": "Jobs", **{k: j[k] for k in ("title", "sql")}} for j in jobs if j["rel"] != FEATURE_FILE]
+    examples += [q for q in query_chunks(QUERIES_FILE)
+                 if LAKEHOUSE or not q["title"].startswith(("Point-in-time", "Iceberg catalog"))]
+    if not LAKEHOUSE:
+        return examples
+    examples.append({"group": "Add a feature", "title": "Step 1 — ALTER TABLE: add avg_stake_7d",
+                     "sql": alter_feature_sql()})
+    examples += [{"group": "Add a feature", **{k: j[k] for k in ("title", "sql")}} for j in jobs if j["rel"] == FEATURE_FILE]
     return examples
+
+
+def alter_feature_sql():
+    return section(FEATURE_FILE, "Step 1")
 
 
 # ── Gateway access ────────────────────────────────────────────────────────────
@@ -255,12 +331,18 @@ def index():
 
 @app.route("/pipeline")
 def pipeline_page():
-    return send_from_directory(app.static_folder, "pipeline.html")
+    # The mode goes into the page itself, so the diagram is drawn right the first time.
+    with open(os.path.join(app.static_folder, "pipeline.html")) as f:
+        html = f.read()
+    mode = "complete" if LAKEHOUSE else "simple"
+    return Response(html.replace("<html lang=\"en\">", f"<html lang=\"en\" data-mode=\"{mode}\">", 1),
+                    mimetype="text/html")
 
 
 @app.get("/api/config")
 def config():
-    return jsonify({"preloadDdl": PRELOAD_DDL})
+    return jsonify({"preloadDdl": PRELOAD_DDL, "lakehouse": LAKEHOUSE,
+                    "tiering": LAKEHOUSE and tiering_available()})
 
 
 @app.post("/api/session")
@@ -440,40 +522,74 @@ def flink(method, path, **kw):
 
 ACTIVE = {"CREATED", "INITIALIZING", "RUNNING", "RESTARTING", "FAILING", "CANCELLING", "RECONCILING"}
 DEFAULT_DB = (BUILTIN_CATALOG, "default_database")
-FEATURE_STORE = ("fluss", "betting", "player_feature_store")
+BETTING = ("fluss", "betting")
+FEATURE_STORE = BETTING + ("player_feature_store",)
+KAFKA_TABLES = ["bets_kafka", "bet_settlements_kafka", "login_events_kafka", "deposits_kafka"]
+LOG_TABLES = {"fl_bets": "bets", "fl_settlements": "bet_settlements",
+              "fl_logins": "login_events", "fl_deposits": "deposits"}
 
-# Box -> its table. `kind` drives the state: a source is live as soon as it exists (the
+# Box -> its table(s). `kind` drives the state: a source is live as soon as it exists (the
 # generators publish all along); a sink is probed for a first row while the job feeding it
 # runs, unless `probe` is False (a Kafka topic: a probe would be an unbounded read).
+# `tables` lists every table a box stands for (the Kafka box is four topics); `table` is
+# the one its probe reads.
 NODES = {
+    "kafka":              {"table": DEFAULT_DB + ("bets_kafka",), "tables": [DEFAULT_DB + (t,) for t in KAFKA_TABLES],
+                           "kind": "source"},
     "players_cdc":        {"table": DEFAULT_DB + ("players_cdc",), "kind": "source"},
     "player_wallets_cdc": {"table": DEFAULT_DB + ("player_wallets_cdc",), "kind": "source"},
-    "bets":               {"table": DEFAULT_DB + ("bets",), "kind": "source"},
-    "bet_settlements":    {"table": DEFAULT_DB + ("bet_settlements",), "kind": "source"},
-    "login_events":       {"table": DEFAULT_DB + ("login_events",), "kind": "source"},
+    **{n: {"table": BETTING + (t,), "kind": "sink", "feed": ["ingest"]} for n, t in LOG_TABLES.items()},
+    # The Iceberg copy of the tiered log tables, as Fluss exposes it: bets$lake has a row
+    # once the tiering service has committed its first snapshot.
+    "lake":               {"table": BETTING + ("bets$lake",), "tables": [BETTING + ("bets",)], "kind": "sink",
+                           "feed": ["tiering"]},
     "feature_store":      {"table": FEATURE_STORE, "kind": "sink",
-                           "feed": ["jobA", "jobB1", "jobB2", "jobB3", "jobC1", "jobC2", "jobD"]},
+                           "feed": ["jobA", "jobB1", "jobB2", "jobB3", "jobC1", "jobC2", "jobD", "jobE"]},
     "risk_scores":        {"table": DEFAULT_DB + ("risk_scores",), "kind": "sink", "feed": ["risk_scoring"],
                            "probe": False},
     "risk_score_log":     {"table": DEFAULT_DB + ("risk_score_log",), "kind": "sink", "feed": ["risk_log"]},
 }
-# Job boxes, matched to Flink jobs by pipeline.name: all seven feature jobs write the same
-# Fluss table, so the sink in a job's plan cannot tell them apart.
+# Job boxes, matched to Flink jobs by pipeline.name: all the feature jobs write the same
+# Fluss table, so the sink in a job's plan cannot tell them apart. `names` lists every
+# name that counts (risk scoring has a v2 in the new-feature walkthrough); `prefix`
+# matches the tiering service, whose name carries the lake format.
 EDGES = {
-    "jobA":         {"from": ["players_cdc", "player_wallets_cdc"], "to": "feature_store", "name": "jobA-cdc-dimensions"},
-    "jobB1":        {"from": ["bets"], "to": "feature_store", "name": "jobB1-bet-velocity"},
-    "jobB2":        {"from": ["bets"], "to": "feature_store", "name": "jobB2-live-ratio-avg-odds"},
-    "jobB3":        {"from": ["bets"], "to": "feature_store", "name": "jobB3-stake-sport-variety"},
-    "jobC1":        {"from": ["bet_settlements"], "to": "feature_store", "name": "jobC1-net-pnl"},
-    "jobC2":        {"from": ["bet_settlements"], "to": "feature_store", "name": "jobC2-loss-streak"},
-    "jobD":         {"from": ["login_events"], "to": "feature_store", "name": "jobD-geo-mismatches"},
-    "risk_scoring": {"from": ["bets", "feature_store"], "to": "risk_scores", "name": "risk-scoring-kafka"},
-    "risk_log":     {"from": ["risk_scores"], "to": "risk_score_log", "name": "risk-score-log-postgres"},
+    "ingest":       {"from": ["kafka"], "to": list(LOG_TABLES), "names": ["ingest-kafka-to-fluss"]},
+    "tiering":      {"from": list(LOG_TABLES), "to": ["lake"], "prefix": "Fluss Lake Tiering Service"},
+    "jobA":         {"from": ["players_cdc", "player_wallets_cdc"], "to": ["feature_store"], "names": ["jobA-cdc-dimensions"]},
+    "jobB1":        {"from": ["fl_bets"], "to": ["feature_store"], "names": ["jobB1-bet-velocity"]},
+    "jobB2":        {"from": ["fl_bets"], "to": ["feature_store"], "names": ["jobB2-live-ratio-avg-odds"]},
+    "jobB3":        {"from": ["fl_bets"], "to": ["feature_store"], "names": ["jobB3-stake-sport-variety"]},
+    "jobC1":        {"from": ["fl_settlements"], "to": ["feature_store"], "names": ["jobC1-net-pnl"]},
+    "jobC2":        {"from": ["fl_settlements"], "to": ["feature_store"], "names": ["jobC2-loss-streak"]},
+    "jobD":         {"from": ["fl_logins"], "to": ["feature_store"], "names": ["jobD-geo-mismatches"]},
+    "risk_scoring": {"from": ["fl_bets", "feature_store"], "to": ["risk_scores"],
+                     "names": ["risk-scoring-kafka", "risk-scoring-kafka-v2"]},
+    "risk_log":     {"from": ["risk_scores"], "to": ["risk_score_log"], "names": ["risk-score-log-postgres"]},
+    # Optional (08_add_feature_avg_stake.sql): never part of the core pipeline's progress.
+    "jobE":         {"from": ["fl_bets", "lake"], "to": ["feature_store"], "names": ["jobE-avg-stake-7d"],
+                     "optional": True},
 }
+# Simple mode: no Fluss log tables, no ingest job, no lake, no tiering service, no job
+# E — and the jobs that read a log table read the Kafka topics instead.
+if not LAKEHOUSE:
+    for n in [*LOG_TABLES, "lake"]:
+        del NODES[n]
+    for e in ("ingest", "tiering", "jobE"):
+        del EDGES[e]
+    NODES["feature_store"]["feed"].remove("jobE")
+    for spec in EDGES.values():
+        spec["from"] = list(dict.fromkeys("kafka" if n in LOG_TABLES else n for n in spec["from"]))
 
 # What every session needs before any box works: the idle-timeout option and the fluss
-# catalog. Session-scoped, so run on page load whenever the session lacks the catalog.
-BOOTSTRAP = [(SOURCES_FILE, "Session options"), (SOURCES_FILE, "Catalogs")]
+# and iceberg catalogs. Session-scoped, so run on page load whenever the session lacks them.
+BOOTSTRAP = [(SOURCES_FILE, "Session options"), (SOURCES_FILE, "Catalogs")] + (
+    [(QUERIES_FILE, "Iceberg catalog")] if LAKEHOUSE else [])
+
+
+def node_tables(node):
+    spec = NODES[node]
+    return spec.get("tables", [spec["table"]])
 
 
 def bootstrap_statements():
@@ -494,45 +610,58 @@ def pipeline_sql():
     # Dropped when the preview stops, so no slot is left behind to pin WAL.
     cdc = lambda t, slot, note: stream(
         t, note, f" /*+ OPTIONS('slot.name' = '{slot}', 'debezium.slot.drop.on.stop' = 'true') */")
+    latest = " /*+ OPTIONS('scan.startup.mode' = 'latest') */"
     jobs = {name: sql for name, _, sql in job_blocks()}
-    return jsonify({
-        "nodes": {
-            "players_cdc": {"create": create_table("players_cdc"),
-                            "view": cdc("players_cdc", "flink_view_players_slot",
-                                        "Every player in PostgreSQL: a snapshot, then each change. It reads through a replication slot of its own, so it can run next to Job A.")},
-            "player_wallets_cdc": {"create": create_table("player_wallets_cdc"),
-                                   "view": cdc("player_wallets_cdc", "flink_view_wallets_slot",
-                                               "Every wallet in PostgreSQL: a snapshot, then each balance change as settlements pay out.")},
-            "bets": {"create": create_table("bets"),
-                     "view": stream("bets", "Every bet on the bets topic. latest-offset: only bets placed from now on. A streaming read: it keeps going until you cancel or close.")},
-            "bet_settlements": {"create": create_table("bet_settlements"),
-                                "view": stream("bet_settlements", "Every settled bet on the bet_settlements topic: win, loss or void, stake and payout.")},
-            "login_events": {"create": create_table("login_events"),
-                             "view": stream("login_events", "Every login on the login_events topic, with the country it came from.")},
-            "feature_store": {"create": without_banner(read_sql(STORE_FILE)),
-                              "view": batch(
-                "200 of the feature store's current rows, one per player. A bounded read of the Fluss primary-key table:\n"
-                "-- in batch mode Fluss serves a LIMIT scan or a key lookup (WHERE player_id = 'BOT_001'), not an ORDER BY.",
-                "SELECT * FROM fluss.betting.player_feature_store LIMIT 200;")},
-            "risk_scores": {"create": create_table("risk_scores"),
-                            "view": stream("risk_scores", "Every scored bet as it is written to the risk_scores topic, from now on.",
-                                           " /*+ OPTIONS('scan.startup.mode' = 'latest-offset') */")},
-            "risk_score_log": {"create": create_table("risk_score_log"),
-                               "view": batch(
-                "The alerts in PostgreSQL's risk_score_log (NORMAL is filtered out), newest first: what Grafana charts.",
-                "SELECT * FROM risk_score_log ORDER BY score_time DESC LIMIT 200;")},
-        },
-        "edges": {e: {"sql": jobs[spec["name"]].rstrip() + "\n" + RESET_NAME} for e, spec in EDGES.items()},
-    })
-
-
-def without_banner(sql):
-    """A file minus its `-- =====` header box, keeping the comments after it."""
-    lines = sql.splitlines()
-    if lines and lines[0].startswith("-- ="):
-        end = next((i for i in range(1, len(lines)) if lines[i].startswith("-- =")), 0)
-        lines = lines[end + 1:]
-    return "\n".join(lines).strip() + "\n"
+    log_notes = {
+        "fl_bets": "Every bet in the Fluss log table, from now on ('latest')." + (
+            " Without the hint this would be a union read: the whole Iceberg history first." if LAKEHOUSE else ""),
+        "fl_settlements": "Every settled bet in the Fluss log table (win, loss or void, stake and payout), from now on.",
+        "fl_logins": "Every login in the Fluss log table, with its country, from now on.",
+        "fl_deposits": "Every deposit in the Fluss log table, from now on. No feature reads it yet" + (
+            "; it is tiered for history." if LAKEHOUSE else "."),
+    }
+    nodes = {
+        "kafka": {"create": "\n".join(create_table(t) for t in KAFKA_TABLES),
+                  "view": stream("bets_kafka", "Every bet on the bets topic, from the first one (earliest-offset). A streaming read: it keeps going until you cancel or close.")},
+        "players_cdc": {"create": create_table("players_cdc"),
+                        "view": cdc("players_cdc", "flink_view_players_slot",
+                                    "Every player in PostgreSQL: a snapshot, then each change. It reads through a replication slot of its own, so it can run next to Job A.")},
+        "player_wallets_cdc": {"create": create_table("player_wallets_cdc"),
+                               "view": cdc("player_wallets_cdc", "flink_view_wallets_slot",
+                                           "Every wallet in PostgreSQL: a snapshot, then each balance change as settlements pay out.")},
+        **{n: {"create": create_table(f"fluss.betting.{t}", INGEST_FILE) if LAKEHOUSE else "",
+               "view": stream(f"fluss.betting.{t}", log_notes[n], latest)} for n, t in LOG_TABLES.items()},
+        "lake": {"create": "",
+                 "view": batch(
+            "What the lake holds: bets in Iceberg alone ($lake) against the union read (Iceberg + the Fluss tail).\n"
+            "-- The lake trails by about one checkpoint (60 s); see 07_analytics_and_monitoring.sql for time travel.",
+            "SELECT\n"
+            "  (SELECT COUNT(*) FROM fluss.betting.`bets$lake`)     AS bets_in_iceberg,\n"
+            "  (SELECT COUNT(*) FROM fluss.betting.bets)            AS bets_union_read,\n"
+            "  (SELECT MAX(event_ts) FROM fluss.betting.`bets$lake`) AS iceberg_up_to;")},
+        "feature_store": {"create": create_table("fluss.betting.player_feature_store", STORE_FILE),
+                          "view": batch(
+            "200 of the feature store's current rows, one per player. A bounded read of the Fluss primary-key table:\n"
+            "-- in batch mode Fluss serves a LIMIT scan or a key lookup (WHERE player_id = 'BOT_001'), not an ORDER BY.",
+            "SELECT * FROM fluss.betting.player_feature_store LIMIT 200;")},
+        "risk_scores": {"create": create_table("risk_scores"),
+                        "view": stream("risk_scores", "Every scored bet as it is written to the risk_scores topic, from now on.",
+                                       " /*+ OPTIONS('scan.startup.mode' = 'latest-offset') */")},
+        "risk_score_log": {"create": create_table("risk_score_log"),
+                           "view": batch(
+            "The alerts in PostgreSQL's risk_score_log (NORMAL is filtered out), newest first: what Grafana charts.",
+            "SELECT * FROM risk_score_log ORDER BY score_time DESC LIMIT 200;")},
+    }
+    out = {
+        "nodes": {n: v for n, v in nodes.items() if n in NODES},
+        "edges": {e: {"sql": jobs[spec["names"][0]].rstrip() + "\n" + RESET_NAME}
+                  for e, spec in EDGES.items() if "names" in spec},
+    }
+    if LAKEHOUSE:
+        # The new-feature walkthrough: step 1 and step 3 (step 2 is edges.jobE).
+        out["feature"] = {"alter": alter_feature_sql(),
+                          "scoring": jobs["risk-scoring-kafka-v2"].rstrip() + "\n" + RESET_NAME}
+    return jsonify(out)
 
 
 def qualified(stmt):
@@ -552,6 +681,101 @@ def pipeline_bootstrap(session):
     except (GatewayError, requests.RequestException, OSError) as e:
         return json_error(e)
     return jsonify({"ok": True, "sources": restored})
+
+
+# ── The tiering service: deployed ahead of time, started with one click ──────
+# The Fluss tiering service is a Flink job shipped as a JAR (lib/tiering/). "Deploy"
+# uploads the JAR to the JobManager (start.sh does it in both modes), so it is listed
+# under Submit New Job; "Start" runs it with scripts/tiering.args — the same arguments
+# scripts/tiering.sh passes from a terminal. Both go through the JobManager's REST API,
+# so the job inherits the cluster's 60 s checkpoint interval, which is when it commits.
+TIERING_JOB = "Fluss Lake Tiering Service"
+
+
+def tiering_jar_file():
+    jars = sorted(glob.glob(os.path.join(TIERING_JAR_DIR, "fluss-flink-tiering-*.jar")))
+    return jars[-1] if jars else None
+
+
+def tiering_available():
+    return bool(tiering_jar_file()) and os.path.isfile(TIERING_ARGS)
+
+
+def tiering_args():
+    with open(TIERING_ARGS) as f:
+        lines = [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+    # programArgsList, not a single programArgs string: no quoting rules to get wrong.
+    return [part for line in lines for part in line.split()]
+
+
+def uploaded_tiering_jar():
+    """The id of the tiering JAR already uploaded to the JobManager, or None. Uploads
+    live in the JobManager's /tmp, so a JobManager restart forgets them."""
+    name = os.path.basename(tiering_jar_file() or "")
+    for f in flink("GET", "/jars").get("files", []):
+        if f.get("name") == name:
+            return f["id"]
+    return None
+
+
+def deploy_tiering():
+    jar_id = uploaded_tiering_jar()
+    if jar_id:
+        return jar_id
+    path = tiering_jar_file()
+    with open(path, "rb") as f:
+        res = flink("POST", "/jars/upload", timeout=120,
+                    files={"jarfile": (os.path.basename(path), f, "application/java-archive")})
+    return os.path.basename(res["filename"])
+
+
+def tiering_job():
+    jobs = flink("GET", "/jobs/overview").get("jobs", [])
+    live = [j for j in jobs if j["name"].startswith(TIERING_JOB) and j["state"] in ACTIVE]
+    return max(live, key=lambda j: j["start-time"]) if live else None
+
+
+def tiering_status():
+    job = tiering_job()
+    return {
+        "available": tiering_available(),
+        "deployed": uploaded_tiering_jar() is not None,
+        "job": {"id": job["jid"], "state": job["state"]} if job else None,
+    }
+
+
+@app.get("/api/tiering")
+def tiering_get():
+    if not tiering_available():
+        return jsonify({"available": False})
+    try:
+        return jsonify(tiering_status())
+    except (GatewayError, requests.RequestException) as e:
+        return json_error(f"could not reach the Flink JobManager: {e}")
+
+
+@app.post("/api/tiering/deploy")
+def tiering_deploy():
+    try:
+        jar_id = deploy_tiering()
+    except (GatewayError, requests.RequestException, OSError) as e:
+        return json_error(f"could not upload the tiering JAR: {e}")
+    return jsonify({"jar": jar_id, **tiering_status()})
+
+
+@app.post("/api/tiering/start")
+def tiering_start():
+    """Idempotent: with a tiering job already running this changes nothing — two tiering
+    jobs would compete for the same tables. Re-uploads the JAR if a JobManager restart
+    lost it, so Start works whether or not start.sh deployed it first."""
+    try:
+        if tiering_job() is None:
+            jar_id = deploy_tiering()
+            flink("POST", f"/jars/{jar_id}/run", timeout=120,
+                  json={"programArgsList": tiering_args()})
+        return jsonify(tiering_status())
+    except (GatewayError, requests.RequestException, OSError) as e:
+        return json_error(f"could not start the tiering service: {e}")
 
 
 # Which tables a job writes, from its plan: shown in the catalog panel's Job Catalog.
@@ -574,7 +798,14 @@ def active_jobs():
 
 
 def edge_jobs(active, edge):
-    return [j for j in active if j["name"] == EDGES[edge]["name"]]
+    spec = EDGES[edge]
+    if "prefix" in spec:
+        return [j for j in active if j["name"].startswith(spec["prefix"])]
+    return [j for j in active if j["name"] in spec["names"]]
+
+
+def edge_nodes(edge):
+    return EDGES[edge]["from"] + EDGES[edge]["to"]
 
 
 def names(session, sql):
@@ -592,12 +823,12 @@ def restore_sources(session):
     running = {e for e in EDGES if any(j["state"] == "RUNNING" for j in edge_jobs(active, e))}
     listed = names(session, f"SHOW TABLES IN {ident(*DEFAULT_DB)}")
     restored = []
-    for node, spec in NODES.items():
-        if spec["table"][:2] != DEFAULT_DB or spec["table"][2] in listed:
-            continue
-        if any(node in (EDGES[e]["from"] + [EDGES[e]["to"]]) for e in running):
-            for stmt in split_statements(create_table(spec["table"][2])):
-                execute_and_wait(session, qualified(stmt))
+    for node in NODES:
+        missing = [t[2] for t in node_tables(node) if t[:2] == DEFAULT_DB and t[2] not in listed]
+        if missing and any(node in edge_nodes(e) for e in running):
+            for name in missing:
+                for stmt in split_statements(create_table(name)):
+                    execute_and_wait(session, qualified(stmt))
             restored.append(node)
     return restored
 
@@ -675,14 +906,22 @@ threading.Thread(target=probe_worker, daemon=True, name="pipeline-probe").start(
 @app.get("/api/pipeline/status/<session>")
 def pipeline_status(session):
     try:
-        catalogs = names(session, "SHOW CATALOGS")
+        # Not names(): a session the gateway no longer knows (a restarted stack) must fail
+        # loudly. Swallowed, it would read as "no tables at all", every box would go grey,
+        # and the page would keep polling a dead session instead of opening a new one.
+        catalogs = {r[0] for r in query_rows(session, "SHOW CATALOGS")[1]}
+    except GatewayError as e:
+        return json_error(f"session {session} is gone: {e}", 410)
+    except requests.RequestException as e:
+        return json_error(e)
+    try:
         listed = {
             DEFAULT_DB: names(session, f"SHOW TABLES IN {ident(*DEFAULT_DB)}"),
-            FEATURE_STORE[:2]: names(session, f"SHOW TABLES IN {ident(*FEATURE_STORE[:2])}") if "fluss" in catalogs else set(),
+            BETTING: names(session, f"SHOW TABLES IN {ident(*BETTING)}") if "fluss" in catalogs else set(),
         }
     except requests.RequestException as e:
         return json_error(e)
-    exists = {n: spec["table"][2] in listed.get(spec["table"][:2], set()) for n, spec in NODES.items()}
+    exists = {n: all(t[2] in listed.get(t[:2], set()) for t in node_tables(n)) for n in NODES}
 
     try:
         active = active_jobs()
@@ -695,14 +934,20 @@ def pipeline_status(session):
         edges[e] = {"state": "running" if "RUNNING" in states else
                              "failing" if states & {"RESTARTING", "FAILING"} else
                              "starting" if jobs else "idle",
-                    "jobs": jobs, "ready": all(exists[n] for n in spec["from"] + [spec["to"]])}
+                    "jobs": jobs, "ready": all(exists[n] for n in edge_nodes(e)),
+                    "optional": spec.get("optional", False)}
 
     nodes = {}
     for n, spec in NODES.items():
         fed = any(edges[e]["state"] == "running" for e in spec.get("feed", []))
         if not exists[n]:
-            with probe_lock:
-                probe_ok.discard(n)   # dropped: whatever was confirmed is gone with it
+            # Dropped: whatever was confirmed is gone with it. Only for Fluss tables, which
+            # exist for everyone once created; a default-catalog table missing from this
+            # session says nothing about the data (another session may hold it), and
+            # discarding on it made two open pages re-probe every table, every poll.
+            if spec["table"][:2] == BETTING and "fluss" in catalogs:
+                with probe_lock:
+                    probe_ok.discard(n)
             state = "inactive"
         elif spec["kind"] == "source":
             state = "live"            # the generators publish all along
@@ -714,10 +959,23 @@ def pipeline_status(session):
         nodes[n] = {"state": state, "exists": exists[n]}
 
     running = {e for e, s in edges.items() if s["state"] == "running"}
-    missing = "fluss" not in catalogs or any(
+    missing = "fluss" not in catalogs or (LAKEHOUSE and "iceberg" not in catalogs) or any(
         not exists[n] and NODES[n]["table"][:2] == DEFAULT_DB
-        for e in running for n in EDGES[e]["from"] + [EDGES[e]["to"]])
-    return jsonify({"nodes": nodes, "edges": edges, "bootstrap": missing})
+        for e in running for n in edge_nodes(e))
+    # The new feature's column, for the optional walkthrough's ALTER button.
+    feature_added = False
+    if LAKEHOUSE and exists["feature_store"]:
+        try:
+            cols = query_rows(session, f"DESCRIBE {ident(*FEATURE_STORE)}")[1]
+            feature_added = any(c[0] == "avg_stake_7d" for c in cols)
+        except GatewayError:
+            pass
+    try:
+        tiering = tiering_status() if LAKEHOUSE and tiering_available() else {"available": False}
+    except (GatewayError, requests.RequestException):
+        tiering = {"available": tiering_available(), "deployed": False, "job": None}
+    return jsonify({"nodes": nodes, "edges": edges, "bootstrap": missing,
+                    "feature": {"added": feature_added}, "tiering": tiering})
 
 
 # The data probe's jobs (want_probe): SELECT 1 FROM <table> LIMIT 1, as Flink names them.

@@ -1,10 +1,10 @@
 -- ============================================================
--- Step 3 – CDC dimensions (Pipeline 1, part 1)
+-- Step 4 – CDC dimensions (Pipeline 1, part 1)
 --
 -- One streaming job. Streams player and wallet dimensions from PostgreSQL into the
 -- Fluss feature store via the postgres-cdc connector.
 --
--- Run this BEFORE 04_feature_calculations.sql: it populates the dimension columns
+-- Run this BEFORE 05_feature_calculations.sql: it populates the dimension columns
 -- (kyc_tier, balance, lifetime_deposits) that the risk rules read alongside the
 -- windowed features.
 --
@@ -17,7 +17,7 @@
 --
 --   docker compose exec sql-client /opt/flink/bin/sql-client.sh \
 --     --init /opt/flink_sql/01_sources_and_catalogs.sql \
---     -f    /opt/flink_sql/03_cdc_dimensions.sql
+--     -f    /opt/flink_sql/04_cdc_dimensions.sql
 -- ============================================================
 
 

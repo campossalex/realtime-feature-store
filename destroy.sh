@@ -2,9 +2,9 @@
 # destroy.sh — tear down the betting_features_oss scenario
 #
 # Counterpart to start.sh. By default removes every container, volume and network
-# this scenario created, so the next ./start.sh is a clean slate. Generated
-# artifacts on the host (lib/, fluss-remote-data/) and pulled images are opt-in,
-# because re-creating them means re-downloading ~92 MB of JARs and ~4 GB of images.
+# this scenario created, so the next ./start.sh is a clean slate. The downloaded JARs
+# (lib/) and pulled images are opt-in, because re-creating them means re-downloading
+# ~300 MB of JARs and ~5 GB of images.
 #
 # This only touches Docker objects labelled with this Compose project. It does NOT
 # touch the EC2 instance, the Terraform state under terraform/, other scenarios,
@@ -32,14 +32,16 @@ destroy.sh — tear down the betting_features_oss scenario
 
 Always removes:
   - all containers in the betting-features-oss Compose project (incl. orphans)
-  - the named volumes: postgres-data, flink-checkpoints
+  - the named volumes: postgres-data, flink-checkpoints, fluss-remote-data,
+    minio-data (the Iceberg lake), catalog-db-data (Lakekeeper's catalog)
   - the flink-net network
   - the locally built inference image
 
 Optional:
-  --data        also delete fluss-remote-data/  (Fluss KV snapshots written at runtime)
-  --jars        also delete lib/                (~92 MB; needs ./download-jars.sh again)
-  --images      also remove the images this scenario pulled (~4 GB, shared with
+  --data        also delete a fluss-remote-data/ directory left on the host by older
+                versions of this repo (Fluss's remote data is now a volume, above)
+  --jars        also delete lib/                (~300 MB; needs ./download-jars.sh again)
+  --images      also remove the images this scenario pulled (~5 GB, shared with
                 other OSS scenarios — they will re-pull them)
   --all         --data --jars --images
   -y, --yes     skip the confirmation prompt
@@ -94,7 +96,7 @@ fi
 
 if [ "$WIPE_IMAGES" = "1" ]; then
   echo "  Images to remove:"
-  docker compose config --images 2>/dev/null | sort -u | sed 's/^/    /'
+  COMPOSE_PROFILES=lakehouse docker compose config --images 2>/dev/null | sort -u | sed 's/^/    /'
 fi
 
 echo ""
@@ -107,8 +109,8 @@ fi
 # ── Confirm ───────────────────────────────────────────────────────────────────
 
 if [ "$ASSUME_YES" != "1" ]; then
-  echo "  This is irreversible: the PostgreSQL database and all Flink"
-  echo "  checkpoints are deleted with the volumes."
+  echo "  This is irreversible: the PostgreSQL database, the Fluss tables, the"
+  echo "  Iceberg lake and all Flink checkpoints are deleted with the volumes."
   echo ""
   printf "  Type 'destroy' to continue: "
   read -r reply
@@ -125,7 +127,9 @@ fi
 echo "==> Removing containers, volumes and network..."
 DOWN_ARGS=(--volumes --remove-orphans --rmi local)
 [ "$WIPE_IMAGES" = "1" ] && DOWN_ARGS=(--volumes --remove-orphans --rmi all)
-docker compose down "${DOWN_ARGS[@]}"
+# The lakehouse profile too: otherwise `down` skips the lake containers when .env says
+# simple mode (or is gone).
+COMPOSE_PROFILES=lakehouse docker compose down "${DOWN_ARGS[@]}"
 
 # `down` misses containers whose service was dropped from the compose file, and
 # `--rmi local` leaves the built inference image if its service was already gone.
@@ -159,6 +163,9 @@ if [ "$WIPE_JARS" = "1" ]; then
   rm -rf lib
 fi
 
+# The mode start.sh recorded for Compose: the next ./start.sh writes it again.
+rm -f .env
+
 # ── Step 3: Report ────────────────────────────────────────────────────────────
 
 echo ""
@@ -171,8 +178,9 @@ echo "  Remaining volumes:    $(docker volume ls -q --filter "label=com.docker.c
 echo ""
 echo "  Rebuild with:"
 if [ "$WIPE_JARS" = "1" ]; then
-  echo "    ./download-jars.sh && ./start.sh"
+  echo "    ./download-jars.sh && ./start.sh      # or ./start.sh --simple"
 else
-  echo "    ./start.sh"
+  echo "    ./start.sh             # complete"
+  echo "    ./start.sh --simple    # simple: no lakehouse"
 fi
 echo "══════════════════════════════════════════════════════════════"

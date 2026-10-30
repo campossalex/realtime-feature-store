@@ -1,0 +1,21 @@
+# Program arguments for the Fluss Datalake Tiering Service — one per line; blank lines
+# and lines starting with # are ignored.
+#
+# The ONE copy of these. Read by tiering.sh (terminal) and by the
+# Pipeline Builder tiering Start button (sql-editor/app.py), and it is what to paste into
+# Program Arguments if you start the job from the Flink Web UI's Submit New Job page.
+#
+# The datalake.iceberg.* values must match the Fluss servers' datalake.iceberg.*
+# settings in docker-compose.yml: the job commits through the same REST catalog, to the
+# same bucket.
+--fluss.bootstrap.servers coordinator-server:9123
+--datalake.format iceberg
+--datalake.iceberg.type rest
+--datalake.iceberg.uri http://lakekeeper:8181/catalog
+--datalake.iceberg.warehouse lakehouse
+--datalake.iceberg.io-impl org.apache.iceberg.aws.s3.S3FileIO
+--datalake.iceberg.s3.endpoint http://minio:9000
+--datalake.iceberg.s3.access-key-id admin
+--datalake.iceberg.s3.secret-access-key password
+--datalake.iceberg.s3.path-style-access true
+--datalake.iceberg.client.region us-east-1

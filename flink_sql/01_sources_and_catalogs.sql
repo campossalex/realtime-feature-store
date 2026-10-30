@@ -1,27 +1,21 @@
 -- ============================================================
 -- Step 1 – Catalogs, CDC sources, Kafka sources & sinks
 --
--- OSS Docker Compose variant of betting_features/flink_sql/01_sources_and_catalogs.sql
--- Addresses patched for internal Docker network hostnames.
+-- Every other file is run with this one as --init: the catalogs and the Kafka / CDC
+-- tables live only in the session that creates them.
 --
 -- Architecture:
 --
---   PostgreSQL (players, player_wallets)
---       │  postgres-cdc connector
---       ▼
---   players_cdc, player_wallets_cdc  ─────────────────────┐
---                                                          │
---   Kafka topics (Redpanda)                                │  (feature engineering jobs in 03_)
---     bets ──────────────────────────────────────────────►│
---     bet_settlements ───────────────────────────────────►│
---     login_events ──────────────────────────────────────►│
---     deposits ──────────────────────────────────────────►│
---                                                          ▼
---                                          fluss.betting.player_feature_store
---                                                          │
---                                                          │  temporal lookup join (04_)
---                                                          ▼
---                                                     risk_scores (Kafka + PostgreSQL)
+--   Kafka topics (Redpanda)          ingest (03_)        Fluss log tables, tiered ──► Iceberg
+--     bets_kafka, bet_settlements_kafka, ────────►  fluss.betting.bets, ...          (lakehouse
+--     login_events_kafka, deposits_kafka                    │                         warehouse)
+--                                                           │ feature jobs (05_)
+--   PostgreSQL (players, player_wallets)                    ▼
+--     players_cdc, player_wallets_cdc ── job A (04_) ──► fluss.betting.player_feature_store
+--                                                           │
+--                                                           │ temporal lookup join (06_)
+--                                                           ▼
+--                                                      risk_scores (Kafka + PostgreSQL)
 -- ============================================================
 
 
@@ -52,7 +46,7 @@ SET 'table.exec.source.idle-timeout' = '5 s';
 
 -- ── Catalogs ──────────────────────────────────────────────────────────────────
 
--- Fluss catalog — the online feature store (primary-key tables, sub-second lookups)
+-- Fluss catalog — the event log tables and the online feature store (02_)
 CREATE CATALOG fluss WITH (
   'type'              = 'fluss',
   'bootstrap.servers' = 'coordinator-server:9123'
@@ -60,10 +54,9 @@ CREATE CATALOG fluss WITH (
 
 CREATE DATABASE IF NOT EXISTS fluss.betting;
 
--- NOTE: no Iceberg catalog here. This scenario has no lakehouse tier — Fluss is both the
--- hot store and the historical one, so batch queries read Fluss directly (see
--- 06_analytics_and_monitoring.sql). See conf/fluss-server.yaml for why tiering is not
--- simply a config flag.
+-- No Iceberg catalog here: it exists in complete mode only, and a REST catalog calls
+-- Lakekeeper as soon as it is created, so in simple mode it would fail this whole
+-- --init. It is in 07_analytics_and_monitoring.sql, next to the queries that use it.
 
 -- NOTE: no JDBC *catalog* here. flink-connector-jdbc (3.3.0 and 3.4.0) registers two
 -- CatalogFactory classes that both claim the 'jdbc' identifier, so CREATE CATALOG fails
@@ -121,9 +114,13 @@ CREATE TABLE player_wallets_cdc (
 
 
 -- ── Kafka sources (Redpanda) ──────────────────────────────────────────────────
--- proc_time (PROCTIME()) is required by the Fluss temporal lookup join in step 04.
+-- Complete mode: read only by the ingest job (03_ingest_to_fluss.sql), which copies them
+-- into the Fluss log tables every feature job reads. earliest-offset, so the Fluss
+-- tables — and the Iceberg history behind them — start from the first event of the topic.
+-- Simple mode: the feature and scoring jobs read them directly, overriding the startup
+-- mode to latest-offset (see 05_feature_calculations.sql).
 
-CREATE TABLE bets (
+CREATE TABLE bets_kafka (
   bet_id      STRING,
   player_id   STRING,
   amount      DECIMAL(12,2),
@@ -132,7 +129,6 @@ CREATE TABLE bets (
   odds        DOUBLE,
   event_time  STRING,
   event_ts    AS TO_TIMESTAMP(event_time, 'yyyy-MM-dd HH:mm:ss.SSS'),
-  proc_time   AS PROCTIME(),
   WATERMARK FOR event_ts AS event_ts - INTERVAL '2' SECOND
 ) WITH (
   'connector'                    = 'kafka',
@@ -140,11 +136,11 @@ CREATE TABLE bets (
   'json.ignore-parse-errors'     = 'true',
   'properties.bootstrap.servers' = 'redpanda:9092',
   'properties.group.id'          = 'flink-betting-features',
-  'scan.startup.mode'            = 'latest-offset',
+  'scan.startup.mode'            = 'earliest-offset',
   'topic'                        = 'bets'
 );
 
-CREATE TABLE bet_settlements (
+CREATE TABLE bet_settlements_kafka (
   settlement_id STRING,
   bet_id        STRING,
   player_id     STRING,
@@ -153,7 +149,6 @@ CREATE TABLE bet_settlements (
   payout_amount DECIMAL(12,2),
   event_time    STRING,
   event_ts      AS TO_TIMESTAMP(event_time, 'yyyy-MM-dd HH:mm:ss.SSS'),
-  proc_time     AS PROCTIME(),
   WATERMARK FOR event_ts AS event_ts - INTERVAL '5' SECOND
 ) WITH (
   'connector'                    = 'kafka',
@@ -165,7 +160,7 @@ CREATE TABLE bet_settlements (
   'topic'                        = 'bet_settlements'
 );
 
-CREATE TABLE login_events (
+CREATE TABLE login_events_kafka (
   event_id    STRING,
   player_id   STRING,
   session_id  STRING,
@@ -174,7 +169,6 @@ CREATE TABLE login_events (
   country     STRING,
   event_time  STRING,
   event_ts    AS TO_TIMESTAMP(event_time, 'yyyy-MM-dd HH:mm:ss.SSS'),
-  proc_time   AS PROCTIME(),
   WATERMARK FOR event_ts AS event_ts - INTERVAL '2' SECOND
 ) WITH (
   'connector'                    = 'kafka',
@@ -186,14 +180,13 @@ CREATE TABLE login_events (
   'topic'                        = 'login_events'
 );
 
-CREATE TABLE deposits (
+CREATE TABLE deposits_kafka (
   deposit_id  STRING,
   player_id   STRING,
   amount      DECIMAL(12,2),
   `method`    STRING,       -- 'card' | 'bank_transfer' | 'crypto' | 'ewallet'
   event_time  STRING,
   event_ts    AS TO_TIMESTAMP(event_time, 'yyyy-MM-dd HH:mm:ss.SSS'),
-  proc_time   AS PROCTIME(),
   WATERMARK FOR event_ts AS event_ts - INTERVAL '2' SECOND
 ) WITH (
   'connector'                    = 'kafka',
